@@ -96,9 +96,13 @@ self.onmessage = async (e) => {
       const opts = {
         return_timestamps: true,
         task: "transcribe",
-        chunk_length_s: 30,
-        stride_length_s: 5,
       };
+      // Only needed for audio longer than Whisper's 30s window;
+      // for short live chunks it just wastes compute on padding.
+      if (audio.length > 30 * SAMPLE_RATE) {
+        opts.chunk_length_s = 30;
+        opts.stride_length_s = 5;
+      }
       if (language && language !== "auto") opts.language = language;
 
       const result = await transcriber(audio, opts);

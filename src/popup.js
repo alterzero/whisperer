@@ -17,7 +17,13 @@ const CONFIG_DEFAULTS = {
   ],
   diarizationEnabled: false,
   diarizationThreshold: 0.6,
+  vadThreshold: 0.01,
 };
+
+// Live chunking: keep a short audio tail uncommitted and re-send it with the
+// next chunk so Whisper gets context and words are never cut mid-chunk.
+const LIVE_OVERLAP_SEC = 1.0;
+const LIVE_MAX_DEFER_SEC = 3.0;
 
 let config = { ...CONFIG_DEFAULTS };
 
@@ -41,7 +47,11 @@ let workletNode = null;
 let pcmBuffers = [];
 let pcmSampleCount = 0;
 let pcmOffset = 0;
-let liveSentSamples = 0;
+let liveSentSamples = 0; // start of audio not yet sent (may include uncommitted tail)
+let committedSamples = 0; // audio before this point is already in liveText
+let lastSeenSamples = 0; // total samples observed at last send/skip
+let lastChunkStartSample = 0;
+let lastChunkEndSample = 0;
 let liveInterval = null;
 let liveText = "";
 let liveChunks = [];
@@ -166,6 +176,10 @@ function handleWorkerMessage(e) {
       break;
     case "live-error":
       isLiveProcessing = false;
+      // Skip the failed audio so we don't retry it in a loop
+      liveSentSamples = Math.max(liveSentSamples, lastChunkEndSample);
+      committedSamples = Math.max(committedSamples, liveSentSamples);
+      trimPcmBuffers();
       if (liveProcessingDone) { liveProcessingDone(); liveProcessingDone = null; }
       if (isFinalizing) { isFinalizing = false; finalizeLiveTranscription(); }
       break;
@@ -332,6 +346,7 @@ async function startRecording() {
     activeStreams.push(stream);
 
     pcmBuffers = []; pcmSampleCount = 0; pcmOffset = 0; liveSentSamples = 0;
+    committedSamples = 0; lastSeenSamples = 0; lastChunkStartSample = 0; lastChunkEndSample = 0;
     liveText = ""; liveChunks = [];
     isLiveProcessing = false; isFinalizing = false; liveProcessingDone = null;
     worker.postMessage({ type: "reset-speakers" });
@@ -398,8 +413,27 @@ function stopPcmCapture() {
   if (captureCtx) { captureCtx.close(); captureCtx = null; }
 }
 
-function resample(samples, fromRate, toRate) {
+async function resample(samples, fromRate, toRate) {
   if (fromRate === toRate) return samples;
+  try {
+    // OfflineAudioContext resamples with proper anti-aliasing filtering,
+    // unlike naive linear interpolation which aliases high frequencies.
+    const len = Math.ceil((samples.length * toRate) / fromRate);
+    const ctx = new OfflineAudioContext(1, len, toRate);
+    const buf = ctx.createBuffer(1, samples.length, fromRate);
+    buf.copyToChannel(samples, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+    const rendered = await ctx.startRendering();
+    return rendered.getChannelData(0);
+  } catch {
+    return resampleLinear(samples, fromRate, toRate);
+  }
+}
+
+function resampleLinear(samples, fromRate, toRate) {
   const ratio = fromRate / toRate;
   const len = Math.round(samples.length / ratio);
   const out = new Float32Array(len);
@@ -411,6 +445,20 @@ function resample(samples, fromRate, toRate) {
     out[i] = samples[lo] * (1 - f) + samples[hi] * f;
   }
   return out;
+}
+
+function isSilent(samples, threshold) {
+  if (!threshold || samples.length === 0) return false;
+  let sum = 0;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    sum += v * v;
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+  }
+  const rms = Math.sqrt(sum / samples.length);
+  return rms < threshold && peak < threshold * 3;
 }
 
 function extractPcm(startSample) {
@@ -441,9 +489,9 @@ function trimPcmBuffers() {
 
 // --- Live Transcription ---
 
-function sendLiveChunk(rawPcm, timeOffset) {
-  const resampled = resample(rawPcm, nativeSampleRate, 16000);
+async function sendLiveChunk(rawPcm, timeOffset) {
   isLiveProcessing = true;
+  const resampled = await resample(rawPcm, nativeSampleRate, 16000);
   worker.postMessage(
     { type: "transcribe-live", audio: resampled, language: languageSelect.value, timeOffset, diarize: config.diarizationEnabled && isDiarizationReady },
     [resampled.buffer]
@@ -452,12 +500,22 @@ function sendLiveChunk(rawPcm, timeOffset) {
 
 function processLiveChunk() {
   if (isLiveProcessing) return;
-  if (pcmSampleCount - liveSentSamples < nativeSampleRate) return;
+  if (pcmSampleCount - lastSeenSamples < nativeSampleRate) return;
 
   const rawPcm = extractPcm(liveSentSamples);
+  lastSeenSamples = pcmSampleCount;
+
+  // VAD: skip silent audio entirely (avoids Whisper hallucinations + saves compute)
+  if (isSilent(rawPcm, config.vadThreshold)) {
+    liveSentSamples = Math.max(liveSentSamples, pcmSampleCount - Math.floor(nativeSampleRate * LIVE_OVERLAP_SEC));
+    committedSamples = Math.max(committedSamples, liveSentSamples);
+    trimPcmBuffers();
+    return;
+  }
+
+  lastChunkStartSample = liveSentSamples;
+  lastChunkEndSample = pcmSampleCount;
   const timeOffset = liveSentSamples / nativeSampleRate;
-  liveSentSamples = pcmSampleCount;
-  trimPcmBuffers();
   sendLiveChunk(rawPcm, timeOffset);
 }
 
@@ -465,14 +523,59 @@ function handleLiveResult(text, chunks) {
   isLiveProcessing = false;
   if (liveProcessingDone) { liveProcessingDone(); liveProcessingDone = null; }
 
-  if (text?.trim()) {
-    liveChunks.push(...(chunks || []));
-    const hasSpeakers = chunks?.some((c) => c.speaker);
+  const timeOffset = lastChunkStartSample / nativeSampleRate;
+  const dur = (lastChunkEndSample - lastChunkStartSample) / nativeSampleRate;
+  const relEnd = (c) => (c.timestamp?.[1] ?? timeOffset + dur) - timeOffset;
+  const relStart = (c) => (c.timestamp?.[0] ?? timeOffset) - timeOffset;
+
+  let all = chunks || [];
+  if (all.length === 0 && text?.trim()) {
+    all = [{ text, timestamp: [timeOffset, timeOffset + dur] }];
+  }
+
+  // Drop content already committed in a previous pass (re-sent overlap audio)
+  const committedRel = (committedSamples - lastChunkStartSample) / nativeSampleRate;
+  all = all.filter((c) => relEnd(c) > committedRel + 0.15);
+
+  let committed;
+  if (isFinalizing) {
+    committed = all;
+    liveSentSamples = lastChunkEndSample;
+    committedSamples = lastChunkEndSample;
+  } else {
+    // Defer chunks near the tail; they get re-transcribed with the next chunk
+    // so words/sentences cut at the boundary are recognized with full context.
+    const boundary = dur - LIVE_OVERLAP_SEC;
+    const minStart = dur - LIVE_MAX_DEFER_SEC;
+    committed = [];
+    const deferred = [];
+    for (const c of all) {
+      // Commit if it ends before the tail, or if deferring would grow the
+      // re-sent window beyond the cap.
+      if (relEnd(c) <= boundary || relStart(c) < minStart) committed.push(c);
+      else deferred.push(c);
+    }
+    let resendFrom = boundary;
+    for (const c of deferred) resendFrom = Math.min(resendFrom, relStart(c));
+    resendFrom = Math.max(0, Math.min(resendFrom, dur));
+
+    let commitEndRel = resendFrom;
+    for (const c of committed) commitEndRel = Math.max(commitEndRel, Math.min(relEnd(c), dur));
+
+    liveSentSamples = Math.min(lastChunkEndSample, lastChunkStartSample + Math.floor(resendFrom * nativeSampleRate));
+    committedSamples = Math.max(committedSamples, lastChunkStartSample + Math.floor(commitEndRel * nativeSampleRate));
+  }
+  trimPcmBuffers();
+
+  if (committed.length > 0) {
+    liveChunks.push(...committed);
+    const hasSpeakers = committed.some((c) => c.speaker);
     if (hasSpeakers) {
-      const labeled = chunks.map((c) => c.speaker ? `[${c.speaker}] ${c.text.trim()}` : c.text.trim()).join("\n");
+      const labeled = committed.map((c) => (c.speaker ? `[${c.speaker}] ${c.text.trim()}` : c.text.trim())).join("\n");
       liveText += (liveText ? "\n" : "") + labeled;
     } else {
-      liveText += (liveText ? " " : "") + text.trim();
+      const joined = committed.map((c) => c.text.trim()).filter(Boolean).join(" ");
+      if (joined) liveText += (liveText ? " " : "") + joined;
     }
     transcriptionResult.textContent = liveText;
     transcriptionResult.scrollTop = transcriptionResult.scrollHeight;
@@ -487,11 +590,16 @@ async function processRemainingLiveAudio() {
     await new Promise((resolve) => { liveProcessingDone = resolve; });
   }
 
-  const remaining = pcmSampleCount - liveSentSamples;
+  const remaining = pcmSampleCount - committedSamples;
   if (remaining > nativeSampleRate * 0.5) {
     const rawPcm = extractPcm(liveSentSamples);
+    if (isSilent(rawPcm, config.vadThreshold)) {
+      finalizeLiveTranscription();
+      return;
+    }
+    lastChunkStartSample = liveSentSamples;
+    lastChunkEndSample = pcmSampleCount;
     const timeOffset = liveSentSamples / nativeSampleRate;
-    liveSentSamples = pcmSampleCount;
     isFinalizing = true;
     sendLiveChunk(rawPcm, timeOffset);
   } else {

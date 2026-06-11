@@ -13,6 +13,7 @@ const DEFAULTS = {
   ],
   diarizationEnabled: false,
   diarizationThreshold: 0.6,
+  vadThreshold: 0.01,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -21,6 +22,7 @@ const liveIntervalInput = $("live-interval");
 const maxHistoryInput = $("max-history");
 const maxTokensInput = $("max-tokens");
 const chunkCharsInput = $("chunk-chars");
+const vadThresholdInput = $("vad-threshold");
 const systemPromptInput = $("system-prompt");
 const diarizationThresholdInput = $("diarization-threshold");
 const diarizationThresholdValue = $("diarization-threshold-value");
@@ -40,6 +42,7 @@ function populateForm(config) {
   maxHistoryInput.value = config.maxHistory;
   maxTokensInput.value = config.maxTokens;
   chunkCharsInput.value = config.chunkChars;
+  vadThresholdInput.value = config.vadThreshold;
   systemPromptInput.value = config.systemPrompt;
   diarizationThresholdInput.value = config.diarizationThreshold;
   diarizationThresholdValue.textContent = config.diarizationThreshold.toFixed(2);
@@ -107,7 +110,13 @@ function collectConfig() {
     systemPrompt: systemPromptInput.value.trim() || DEFAULTS.systemPrompt,
     sections: collectSections().length > 0 ? collectSections() : DEFAULTS.sections,
     diarizationThreshold: Math.max(0.3, Math.min(0.9, parseFloat(diarizationThresholdInput.value) || DEFAULTS.diarizationThreshold)),
+    vadThreshold: clampOrDefault(parseFloat(vadThresholdInput.value), 0, 0.05, DEFAULTS.vadThreshold),
   };
+}
+
+function clampOrDefault(value, min, max, fallback) {
+  if (isNaN(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
 }
 
 async function save() {
