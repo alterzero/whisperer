@@ -96,6 +96,7 @@ const summaryProgressBar = $("summary-progress-bar");
 const summaryProgressText = $("summary-progress-text");
 const summaryResult = $("summary-result");
 const diarizationToggle = $("diarization-toggle");
+const loadDiarizationBtn = $("load-diarization-btn");
 const diarizationStatus = $("diarization-status");
 const copySummaryBtn = $("copy-summary-btn");
 const downloadSummaryBtn = $("download-summary-btn");
@@ -135,13 +136,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   languageSelect.addEventListener("change", () => chrome.storage.local.set({ [LANG_KEY]: languageSelect.value }));
 
   diarizationToggle.checked = config.diarizationEnabled;
+  updateDiarizationControls();
   diarizationToggle.addEventListener("change", () => {
     config.diarizationEnabled = diarizationToggle.checked;
     chrome.storage.local.set({ [CONFIG_KEY]: config });
-    if (config.diarizationEnabled && !isDiarizationReady && !isDiarizationLoading) {
-      loadDiarization();
-    }
+    updateDiarizationControls();
   });
+  loadDiarizationBtn.addEventListener("click", loadDiarization);
 
   worker = new Worker("worker.bundle.js", { type: "module" });
   worker.onmessage = handleWorkerMessage;
@@ -190,11 +191,14 @@ function handleWorkerMessage(e) {
       isDiarizationLoading = false;
       diarizationStatus.textContent = "Ready";
       diarizationStatus.className = "diarization-status ready";
+      updateDiarizationControls();
       break;
     case "diarization-error":
       isDiarizationLoading = false;
+      loadDiarizationBtn.disabled = false;
       diarizationStatus.textContent = "Error: " + msg.message;
       diarizationStatus.className = "diarization-status error";
+      loadDiarizationBtn.classList.toggle("hidden", !config.diarizationEnabled);
       break;
     case "diarization-warn":
       // Non-fatal: a single chunk failed diarization, transcription continues
@@ -238,8 +242,22 @@ function loadModel() {
   worker.postMessage({ type: "load", model: modelSelect.value });
 }
 
+function updateDiarizationControls() {
+  const showLoadBtn = config.diarizationEnabled && !isDiarizationReady && !isDiarizationLoading;
+  loadDiarizationBtn.classList.toggle("hidden", !showLoadBtn);
+  if (showLoadBtn) {
+    diarizationStatus.textContent = "Model not loaded";
+    diarizationStatus.className = "diarization-status";
+  } else if (!config.diarizationEnabled && !isDiarizationLoading) {
+    diarizationStatus.textContent = isDiarizationReady ? "Ready" : "";
+    diarizationStatus.className = "diarization-status" + (isDiarizationReady ? " ready" : "");
+  }
+}
+
 function loadDiarization() {
   isDiarizationLoading = true;
+  loadDiarizationBtn.disabled = true;
+  loadDiarizationBtn.classList.add("hidden");
   diarizationStatus.textContent = "Loading...";
   diarizationStatus.className = "diarization-status loading";
   worker.postMessage({ type: "load-diarization", threshold: config.diarizationThreshold });
