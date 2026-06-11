@@ -36,16 +36,11 @@ header h1 {
   margin-top: 2px;
 }
 
-.settings-link {
-  color: #666;
+.settings-btn {
+  display: block;
+  text-align: center;
   text-decoration: none;
-  font-size: 14px;
-  margin-left: 4px;
-  transition: color 0.2s;
-}
-
-.settings-link:hover {
-  color: #00d4ff;
+  width: 100%;
 }
 
 .section {
