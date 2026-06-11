@@ -1,4 +1,4 @@
-import { pipeline, AutoModel, AutoProcessor, env } from "@huggingface/transformers";
+import { pipeline, AutoModel, AutoProcessor, WavLMForXVector, env } from "@huggingface/transformers";
 
 env.backends.onnx.wasm.wasmPaths = new URL("./", import.meta.url).href;
 
@@ -94,7 +94,7 @@ self.onmessage = async (e) => {
       );
       if (await detectWebGPU()) {
         try {
-          embeddingModel = await AutoModel.from_pretrained(
+          embeddingModel = await WavLMForXVector.from_pretrained(
             "Xenova/wavlm-base-plus-sv",
             { device: "webgpu", dtype: "fp32", progress_callback: progressCallback("Embedding: ") }
           );
@@ -103,7 +103,7 @@ self.onmessage = async (e) => {
         }
       }
       if (!embeddingModel) {
-        embeddingModel = await AutoModel.from_pretrained(
+        embeddingModel = await WavLMForXVector.from_pretrained(
           "Xenova/wavlm-base-plus-sv",
           { device: "wasm", dtype: "q8", progress_callback: progressCallback("Embedding: ") }
         );
@@ -477,20 +477,12 @@ async function computeEmbedding(audioSlice) {
   const inputs = await embeddingProcessor(audioSlice, { sampling_rate: SAMPLE_RATE });
   const output = await embeddingModel(inputs);
 
-  // Extract embedding - WavLM outputs embeddings in last_hidden_state or embeddings
+  // WavLMForXVector outputs x-vector speaker embeddings in output.embeddings
+  // (512-dim, from the TDNN + projection head). These are discriminative for
+  // speaker identity, unlike raw last_hidden_state which captures phonetics.
   let embedding;
   if (output.embeddings) {
     embedding = Float32Array.from(output.embeddings.data);
-  } else if (output.last_hidden_state) {
-    // Mean pooling over time dimension
-    const hs = output.last_hidden_state;
-    const [, frames, dim] = hs.dims;
-    embedding = new Float32Array(dim);
-    for (let d = 0; d < dim; d++) {
-      let sum = 0;
-      for (let f = 0; f < frames; f++) sum += hs.data[f * dim + d];
-      embedding[d] = sum / frames;
-    }
   } else {
     return null;
   }
