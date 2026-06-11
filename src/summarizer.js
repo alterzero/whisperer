@@ -96,7 +96,7 @@ self.onmessage = async (e) => {
 
       engine = await Engine.create({
         model: modelStream,
-        mainExecutorSettings: { maxNumTokens: 131072 },
+        mainExecutorSettings: { maxNumTokens: 16384 },
       });
 
       self.postMessage({ type: "ready" });
@@ -112,23 +112,52 @@ self.onmessage = async (e) => {
     }
 
     try {
-      post("status", "Summarizing...");
-
+      const CHUNK_CHARS = 20000;
       const langNote = language ? ` You MUST write the entire summary in ${language}.` : "";
-      const conversation = await engine.createConversation({
-        preface: {
-          messages: [{
-            role: "system",
-            content: `You are a concise meeting notes assistant. Always respond with structured bullet points.${langNote}`,
-          }],
-        },
-      });
-
-      const MAX_INPUT_CHARS = 500000;
-      const trimmed = text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) + "\n[...transcription truncated]" : text;
-
       const langLine = language ? `\nIMPORTANT: Write the summary in ${language}, matching the language of the transcription.\n` : "";
-      const prompt = `Analyze the following transcription and provide a structured summary with these sections:
+
+      if (text.length <= CHUNK_CHARS) {
+        post("status", "Summarizing...");
+        const summary = await streamSummarize(buildPrompt(text, langLine), langNote);
+        self.postMessage({ type: "result", summary: summary || "No summary generated" });
+      } else {
+        const chunks = splitText(text, CHUNK_CHARS);
+        const partials = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+          post("status", `Summarizing part ${i + 1} of ${chunks.length}...`);
+          const partial = await streamSummarize(buildPrompt(chunks[i], langLine), langNote);
+          partials.push(partial);
+        }
+
+        post("status", "Merging summaries...");
+        const mergePrompt = `Merge the following partial summaries into a single structured summary with these sections:
+
+**Important Points:**
+- List the key points discussed
+
+**Decisions:**
+- List any decisions that were made
+
+**Action Items:**
+- List any tasks, follow-ups, or action items mentioned
+
+Be concise, deduplicate, and use bullet points. If a section has no relevant content, write "None identified."
+${langLine}
+Partial summaries:
+${partials.map((s, i) => `--- Part ${i + 1} ---\n${s}`).join("\n\n")}`;
+
+        const summary = await streamSummarize(mergePrompt, langNote);
+        self.postMessage({ type: "result", summary: summary || "No summary generated" });
+      }
+    } catch (err) {
+      self.postMessage({ type: "error", message: errMsg(err) });
+    }
+  }
+};
+
+function buildPrompt(text, langLine) {
+  return `Analyze the following transcription and provide a structured summary with these sections:
 
 **Important Points:**
 - List the key points discussed
@@ -142,25 +171,46 @@ self.onmessage = async (e) => {
 Be concise and use bullet points. If a section has no relevant content, write "None identified."
 ${langLine}
 Transcription:
-${trimmed}`;
+${text}`;
+}
 
-      let summary = "";
-      const stream = conversation.sendMessageStreaming(prompt);
-      for await (const chunk of stream) {
-        for (const item of chunk.content) {
-          if (item.type === "text") {
-            summary += item.text;
-            self.postMessage({ type: "stream", partial: summary });
-          }
-        }
+function splitText(text, maxChars) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxChars, text.length);
+    if (end < text.length) {
+      const lastBreak = text.lastIndexOf(". ", end);
+      if (lastBreak > start + maxChars * 0.5) end = lastBreak + 1;
+    }
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+async function streamSummarize(prompt, langNote) {
+  const conversation = await engine.createConversation({
+    preface: {
+      messages: [{
+        role: "system",
+        content: `You are a concise meeting notes assistant. Always respond with structured bullet points.${langNote}`,
+      }],
+    },
+  });
+
+  let result = "";
+  const stream = conversation.sendMessageStreaming(prompt);
+  for await (const chunk of stream) {
+    for (const item of chunk.content) {
+      if (item.type === "text") {
+        result += item.text;
+        self.postMessage({ type: "stream", partial: result });
       }
-
-      self.postMessage({ type: "result", summary: summary.trim() || "No summary generated" });
-    } catch (err) {
-      self.postMessage({ type: "error", message: errMsg(err) });
     }
   }
-};
+  return result.trim();
+}
 
 function post(type, message) {
   self.postMessage({ type, message });
