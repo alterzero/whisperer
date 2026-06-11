@@ -41,7 +41,7 @@ async function cacheModel(blob) {
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
-  } catch {}
+  } catch { }
 }
 
 async function loadModelStream() {
@@ -124,7 +124,7 @@ self.onmessage = async (e) => {
         },
       });
 
-      const MAX_INPUT_CHARS = 24000;
+      const MAX_INPUT_CHARS = 64000;
       const trimmed = text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) + "\n[...transcription truncated]" : text;
 
       const langLine = language ? `\nIMPORTANT: Write the summary in ${language}, matching the language of the transcription.\n` : "";
