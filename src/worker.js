@@ -15,6 +15,15 @@ let similarityThreshold = 0.6;
 
 const SAMPLE_RATE = 16000;
 
+async function detectWebGPU() {
+  try {
+    if (!navigator.gpu) return false;
+    return !!(await navigator.gpu.requestAdapter());
+  } catch {
+    return false;
+  }
+}
+
 function progressCallback(prefix) {
   return (progress) => {
     const file = progress.file?.split("/").pop() || "";
@@ -35,15 +44,27 @@ self.onmessage = async (e) => {
     try {
       self.postMessage({ type: "status", message: "Downloading model files..." });
 
-      transcriber = await pipeline(
-        "automatic-speech-recognition",
-        model || "onnx-community/whisper-tiny",
-        {
-          device: "wasm",
-          dtype: model?.includes("medium") || model?.includes("large") ? "q4" : "q8",
-          progress_callback: progressCallback("Downloading "),
+      const modelId = model || "onnx-community/whisper-tiny";
+      const wasmOpts = {
+        device: "wasm",
+        dtype: model?.includes("medium") || model?.includes("large") ? "q4" : "q8",
+        progress_callback: progressCallback("Downloading "),
+      };
+
+      if (await detectWebGPU()) {
+        try {
+          transcriber = await pipeline("automatic-speech-recognition", modelId, {
+            device: "webgpu",
+            dtype: { encoder_model: "fp32", decoder_model_merged: "q4" },
+            progress_callback: progressCallback("Downloading "),
+          });
+        } catch {
+          self.postMessage({ type: "status", message: "WebGPU unavailable, using CPU..." });
+          transcriber = await pipeline("automatic-speech-recognition", modelId, wasmOpts);
         }
-      );
+      } else {
+        transcriber = await pipeline("automatic-speech-recognition", modelId, wasmOpts);
+      }
 
       self.postMessage({ type: "ready" });
     } catch (err) {
@@ -70,10 +91,22 @@ self.onmessage = async (e) => {
         "Xenova/wavlm-base-plus-sv",
         { progress_callback: progressCallback("Embedding: ") }
       );
-      embeddingModel = await AutoModel.from_pretrained(
-        "Xenova/wavlm-base-plus-sv",
-        { device: "wasm", dtype: "q8", progress_callback: progressCallback("Embedding: ") }
-      );
+      if (await detectWebGPU()) {
+        try {
+          embeddingModel = await AutoModel.from_pretrained(
+            "Xenova/wavlm-base-plus-sv",
+            { device: "webgpu", dtype: "fp32", progress_callback: progressCallback("Embedding: ") }
+          );
+        } catch {
+          embeddingModel = null;
+        }
+      }
+      if (!embeddingModel) {
+        embeddingModel = await AutoModel.from_pretrained(
+          "Xenova/wavlm-base-plus-sv",
+          { device: "wasm", dtype: "q8", progress_callback: progressCallback("Embedding: ") }
+        );
+      }
 
       isDiarizationReady = true;
       self.postMessage({ type: "diarization-ready" });
@@ -105,9 +138,19 @@ self.onmessage = async (e) => {
       }
       if (language && language !== "auto") opts.language = language;
 
-      const result = await transcriber(audio, opts);
       const timeOffset = e.data.timeOffset || 0;
       const diarize = e.data.diarize && isDiarizationReady;
+
+      // Kick off segmentation in parallel with ASR — it doesn't depend on
+      // the transcription result, only on the audio.
+      const segmentsPromise = diarize
+        ? getSegments(audio).catch((err) => {
+            self.postMessage({ type: "diarization-warn", message: errMsg(err) });
+            return [];
+          })
+        : null;
+
+      const result = await transcriber(audio, opts);
 
       let chunks = (result.chunks || []).map((c) => ({
         text: c.text,
@@ -117,9 +160,12 @@ self.onmessage = async (e) => {
         ],
       }));
 
-      if (diarize) {
+      if (segmentsPromise) {
         try {
-          chunks = await assignSpeakers(audio, chunks, timeOffset);
+          const segments = await segmentsPromise;
+          if (segments.length > 0) {
+            chunks = await assignSpeakers(audio, chunks, timeOffset, segments);
+          }
         } catch (err) {
           self.postMessage({ type: "diarization-warn", message: errMsg(err) });
         }
@@ -139,9 +185,7 @@ const MAX_EMBED_SEC = 6; // cap embedding input length
 const SEG_MAX_GAP_SEC = 0.5; // merge same-speaker segments separated by less
 const SEG_MIN_DUR_SEC = 0.3; // drop segments shorter than this after merging
 
-async function assignSpeakers(audio, whisperChunks, timeOffset) {
-  // Run pyannote segmentation to get speaker activity per frame
-  const segments = await getSegments(audio);
+async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
   if (segments.length === 0) return whisperChunks;
 
   // Group segments by local speaker and compute one embedding per local

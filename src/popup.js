@@ -53,6 +53,8 @@ let lastSeenSamples = 0; // total samples observed at last send/skip
 let lastChunkStartSample = 0;
 let lastChunkEndSample = 0;
 let liveInterval = null;
+let dynamicIntervalMs = CONFIG_DEFAULTS.liveIntervalMs; // grows if inference is slower than the configured interval
+let chunkSentAt = 0;
 let liveText = "";
 let liveChunks = [];
 let isLiveProcessing = false;
@@ -372,7 +374,9 @@ async function startRecording() {
     worker.postMessage({ type: "reset-speakers" });
 
     await setupPcmCapture(stream);
-    liveInterval = setInterval(processLiveChunk, config.liveIntervalMs);
+    dynamicIntervalMs = config.liveIntervalMs;
+    chunkSentAt = Date.now();
+    liveInterval = setInterval(processLiveChunk, 500);
 
     isRecording = true;
     recordingStartTime = Date.now();
@@ -520,6 +524,7 @@ async function sendLiveChunk(rawPcm, timeOffset) {
 
 function processLiveChunk() {
   if (isLiveProcessing) return;
+  if (Date.now() - chunkSentAt < dynamicIntervalMs) return;
   if (pcmSampleCount - lastSeenSamples < nativeSampleRate) return;
 
   const rawPcm = extractPcm(liveSentSamples);
@@ -535,6 +540,7 @@ function processLiveChunk() {
 
   lastChunkStartSample = liveSentSamples;
   lastChunkEndSample = pcmSampleCount;
+  chunkSentAt = Date.now();
   const timeOffset = liveSentSamples / nativeSampleRate;
   sendLiveChunk(rawPcm, timeOffset);
 }
@@ -542,6 +548,11 @@ function processLiveChunk() {
 function handleLiveResult(text, chunks) {
   isLiveProcessing = false;
   if (liveProcessingDone) { liveProcessingDone(); liveProcessingDone = null; }
+
+  // Adapt chunk cadence to actual inference speed so slow machines don't
+  // pile up unprocessed audio (keeps latency and timestamps stable).
+  const processingMs = Date.now() - chunkSentAt;
+  dynamicIntervalMs = Math.min(30000, Math.max(config.liveIntervalMs, Math.round(processingMs * 1.2)));
 
   const timeOffset = lastChunkStartSample / nativeSampleRate;
   const dur = (lastChunkEndSample - lastChunkStartSample) / nativeSampleRate;
