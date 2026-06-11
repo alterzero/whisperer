@@ -194,6 +194,26 @@ function handleWorkerMessage(e) {
       diarizationStatus.textContent = "Error: " + msg.message;
       diarizationStatus.className = "diarization-status error";
       break;
+    case "diarization-warn":
+      // Non-fatal: a single chunk failed diarization, transcription continues
+      diarizationStatus.textContent = "Warning: " + msg.message;
+      diarizationStatus.className = "diarization-status error";
+      break;
+    case "speakers-remap": {
+      // Worker merged speaker clusters; rewrite labels in displayed text
+      let changed = false;
+      for (const c of liveChunks) {
+        if (c.speaker && msg.map[c.speaker]) { c.speaker = msg.map[c.speaker]; changed = true; }
+      }
+      for (const c of currentChunks) {
+        if (c.speaker && msg.map[c.speaker]) { c.speaker = msg.map[c.speaker]; changed = true; }
+      }
+      if (changed && liveChunks.length > 0) {
+        liveText = buildDisplayText(liveChunks);
+        transcriptionResult.textContent = liveText;
+      }
+      break;
+    }
     case "error":
       setModelStatus("Error: " + msg.message, "error");
       progressContainer.classList.add("hidden");
@@ -569,14 +589,7 @@ function handleLiveResult(text, chunks) {
 
   if (committed.length > 0) {
     liveChunks.push(...committed);
-    const hasSpeakers = committed.some((c) => c.speaker);
-    if (hasSpeakers) {
-      const labeled = committed.map((c) => (c.speaker ? `[${c.speaker}] ${c.text.trim()}` : c.text.trim())).join("\n");
-      liveText += (liveText ? "\n" : "") + labeled;
-    } else {
-      const joined = committed.map((c) => c.text.trim()).filter(Boolean).join(" ");
-      if (joined) liveText += (liveText ? " " : "") + joined;
-    }
+    liveText = buildDisplayText(liveChunks);
     transcriptionResult.textContent = liveText;
     transcriptionResult.scrollTop = transcriptionResult.scrollHeight;
   }
@@ -605,6 +618,28 @@ async function processRemainingLiveAudio() {
   } else {
     finalizeLiveTranscription();
   }
+}
+
+// Build display text from chunks, merging consecutive same-speaker chunks
+// into a single labeled line.
+function buildDisplayText(chunks) {
+  if (!chunks.some((c) => c.speaker)) {
+    return chunks.map((c) => c.text.trim()).filter(Boolean).join(" ");
+  }
+  const lines = [];
+  let curSpeaker;
+  for (const c of chunks) {
+    const t = c.text.trim();
+    if (!t) continue;
+    const sp = c.speaker || null;
+    if (lines.length > 0 && sp === curSpeaker) {
+      lines[lines.length - 1] += " " + t;
+    } else {
+      lines.push(sp ? `[${sp}] ${t}` : t);
+      curSpeaker = sp;
+    }
+  }
+  return lines.join("\n");
 }
 
 async function finalizeLiveTranscription() {

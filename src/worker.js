@@ -120,7 +120,9 @@ self.onmessage = async (e) => {
       if (diarize) {
         try {
           chunks = await assignSpeakers(audio, chunks, timeOffset);
-        } catch {}
+        } catch (err) {
+          self.postMessage({ type: "diarization-warn", message: errMsg(err) });
+        }
       }
 
       self.postMessage({ type: "live-result", text: result.text || "", chunks });
@@ -132,55 +134,135 @@ self.onmessage = async (e) => {
 
 // --- Speaker Diarization ---
 
+const MIN_EMBED_SEC = 0.5; // minimum speech needed for a reliable embedding
+const MAX_EMBED_SEC = 6; // cap embedding input length
+const SEG_MAX_GAP_SEC = 0.5; // merge same-speaker segments separated by less
+const SEG_MIN_DUR_SEC = 0.3; // drop segments shorter than this after merging
+
 async function assignSpeakers(audio, whisperChunks, timeOffset) {
   // Run pyannote segmentation to get speaker activity per frame
   const segments = await getSegments(audio);
   if (segments.length === 0) return whisperChunks;
 
-  // Extract embedding for each speaker segment and assign global IDs
+  // Group segments by local speaker and compute one embedding per local
+  // speaker from their concatenated speech. Longer audio gives far more
+  // reliable WavLM embeddings than tiny per-segment slices.
+  const byLocal = new Map();
   for (const seg of segments) {
-    const slice = audio.slice(
-      Math.floor(seg.start * SAMPLE_RATE),
-      Math.floor(seg.end * SAMPLE_RATE)
-    );
-    if (slice.length < SAMPLE_RATE * 0.3) continue; // skip very short segments
-    seg.speaker = await identifySpeaker(slice);
+    if (!byLocal.has(seg.localSpeaker)) byLocal.set(seg.localSpeaker, []);
+    byLocal.get(seg.localSpeaker).push(seg);
   }
 
-  // Align whisper chunks with speaker segments
-  return whisperChunks.map((chunk) => {
-    const chunkStart = chunk.timestamp[0] - timeOffset;
-    const chunkEnd = chunk.timestamp[1] - timeOffset;
-    const chunkMid = (chunkStart + chunkEnd) / 2;
+  for (const segs of byLocal.values()) {
+    const maxSamples = SAMPLE_RATE * MAX_EMBED_SEC;
+    const parts = [];
+    let total = 0;
+    for (const seg of segs) {
+      if (total >= maxSamples) break;
+      const slice = audio.subarray(
+        Math.floor(seg.start * SAMPLE_RATE),
+        Math.floor(seg.end * SAMPLE_RATE)
+      );
+      parts.push(slice);
+      total += slice.length;
+    }
+    if (total < SAMPLE_RATE * MIN_EMBED_SEC) continue; // too little speech
 
-    // Find the speaker segment that best overlaps with this chunk
-    let bestSpeaker = null;
-    let bestOverlap = 0;
-
-    for (const seg of segments) {
-      if (!seg.speaker) continue;
-      const overlapStart = Math.max(chunkStart, seg.start);
-      const overlapEnd = Math.min(chunkEnd, seg.end);
-      const overlap = Math.max(0, overlapEnd - overlapStart);
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
-        bestSpeaker = seg.speaker;
-      }
+    const concat = new Float32Array(Math.min(total, maxSamples));
+    let pos = 0;
+    for (const p of parts) {
+      const n = Math.min(p.length, concat.length - pos);
+      concat.set(p.subarray(0, n), pos);
+      pos += n;
+      if (pos >= concat.length) break;
     }
 
-    // Fallback: find nearest segment by midpoint
-    if (!bestSpeaker) {
+    const label = await identifySpeaker(concat);
+    for (const seg of segs) seg.speaker = label;
+  }
+
+  // Merge centroids that drifted close together, remap labels accordingly
+  const remap = checkCentroidMerges();
+  if (remap) {
+    for (const seg of segments) {
+      if (seg.speaker && remap[seg.speaker]) seg.speaker = remap[seg.speaker];
+    }
+  }
+
+  return labelChunks(whisperChunks, segments, timeOffset);
+}
+
+// Assign speakers to whisper chunks; split a chunk's text proportionally
+// when it significantly overlaps more than one speaker (speaker turn).
+function labelChunks(whisperChunks, segments, timeOffset) {
+  const out = [];
+
+  for (const chunk of whisperChunks) {
+    const cs = chunk.timestamp[0] - timeOffset;
+    const ce = chunk.timestamp[1] - timeOffset;
+    const chunkDur = Math.max(0.01, ce - cs);
+
+    // Accumulate overlap per global speaker label
+    const overlaps = new Map(); // label -> { dur, firstStart }
+    for (const seg of segments) {
+      if (!seg.speaker) continue;
+      const o = Math.min(ce, seg.end) - Math.max(cs, seg.start);
+      if (o <= 0) continue;
+      const e = overlaps.get(seg.speaker) || { dur: 0, firstStart: Infinity };
+      e.dur += o;
+      e.firstStart = Math.min(e.firstStart, Math.max(seg.start, cs));
+      overlaps.set(seg.speaker, e);
+    }
+
+    if (overlaps.size === 0) {
+      // Fallback: nearest labeled segment by midpoint
+      const chunkMid = (cs + ce) / 2;
+      let best = null;
       let minDist = Infinity;
       for (const seg of segments) {
         if (!seg.speaker) continue;
-        const segMid = (seg.start + seg.end) / 2;
-        const dist = Math.abs(chunkMid - segMid);
-        if (dist < minDist) { minDist = dist; bestSpeaker = seg.speaker; }
+        const dist = Math.abs(chunkMid - (seg.start + seg.end) / 2);
+        if (dist < minDist) { minDist = dist; best = seg.speaker; }
       }
+      out.push({ ...chunk, speaker: best });
+      continue;
     }
 
-    return { ...chunk, speaker: bestSpeaker || null };
-  });
+    const entries = [...overlaps.entries()].sort((a, b) => a[1].firstStart - b[1].firstStart);
+    const significant = entries.filter(([, v]) => v.dur >= 0.5 && v.dur >= chunkDur * 0.25);
+
+    if (significant.length < 2) {
+      // Single dominant speaker
+      let best = null;
+      let bestDur = 0;
+      for (const [label, v] of entries) {
+        if (v.dur > bestDur) { bestDur = v.dur; best = label; }
+      }
+      out.push({ ...chunk, speaker: best });
+      continue;
+    }
+
+    // Multiple speakers within one chunk: split words proportionally to
+    // each speaker's overlap duration, in order of first appearance.
+    const words = chunk.text.trim().split(/\s+/).filter(Boolean);
+    const totalDur = significant.reduce((s, [, v]) => s + v.dur, 0);
+    let wi = 0;
+    let t = chunk.timestamp[0];
+    significant.forEach(([label, v], idx) => {
+      const isLast = idx === significant.length - 1;
+      const n = isLast
+        ? words.length - wi
+        : Math.max(1, Math.round((words.length * v.dur) / totalDur));
+      const part = words.slice(wi, wi + n).join(" ");
+      wi += n;
+      const partDur = chunkDur * (v.dur / totalDur);
+      const end = isLast ? chunk.timestamp[1] : t + partDur;
+      if (part) out.push({ text: " " + part, timestamp: [t, end], speaker: label });
+      t = end;
+    });
+  }
+
+  return out;
 }
 
 async function getSegments(audio) {
@@ -195,50 +277,104 @@ async function getSegments(audio) {
   const numClasses = logits.dims[2];
   const frameDuration = audio.length / SAMPLE_RATE / numFrames;
 
-  // For each frame, determine which local speakers are active
-  const segments = []; // [{start, end, localSpeaker}]
-  const active = {}; // localSpeaker -> {start}
-
+  // Decode per-frame argmax into 3 boolean activity tracks
+  const tracks = [new Uint8Array(numFrames), new Uint8Array(numFrames), new Uint8Array(numFrames)];
   for (let f = 0; f < numFrames; f++) {
     const offset = f * numClasses;
-
-    // Find class with highest logit using softmax-argmax
     let maxVal = -Infinity;
     let maxIdx = 0;
     for (let c = 0; c < numClasses; c++) {
       if (data[offset + c] > maxVal) { maxVal = data[offset + c]; maxIdx = c; }
     }
+    if (maxIdx === 1 || maxIdx === 4 || maxIdx === 5) tracks[0][f] = 1;
+    if (maxIdx === 2 || maxIdx === 4 || maxIdx === 6) tracks[1][f] = 1;
+    if (maxIdx === 3 || maxIdx === 5 || maxIdx === 6) tracks[2][f] = 1;
+  }
 
-    // Decode which speakers are active for this class
-    const activeSpeakers = new Set();
-    if (maxIdx === 1 || maxIdx === 4 || maxIdx === 5) activeSpeakers.add(1);
-    if (maxIdx === 2 || maxIdx === 4 || maxIdx === 6) activeSpeakers.add(2);
-    if (maxIdx === 3 || maxIdx === 5 || maxIdx === 6) activeSpeakers.add(3);
+  const segments = []; // [{start, end, localSpeaker}]
+  const totalDuration = audio.length / SAMPLE_RATE;
+  for (let s = 0; s < 3; s++) {
+    const smoothed = majorityFilter(tracks[s], 5); // remove frame flicker
+    let segs = trackToSegments(smoothed, frameDuration, s + 1, totalDuration);
+    segs = mergeAndFilterSegments(segs, SEG_MAX_GAP_SEC, SEG_MIN_DUR_SEC);
+    segments.push(...segs);
+  }
+  segments.sort((a, b) => a.start - b.start);
+  return segments;
+}
 
-    const time = f * frameDuration;
+// Majority vote over a sliding window for a binary track
+function majorityFilter(track, windowSize) {
+  const half = Math.floor(windowSize / 2);
+  const out = new Uint8Array(track.length);
+  for (let i = 0; i < track.length; i++) {
+    let ones = 0;
+    let count = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(track.length - 1, i + half); j++) {
+      ones += track[j];
+      count++;
+    }
+    out[i] = ones * 2 > count ? 1 : 0;
+  }
+  return out;
+}
 
-    // Close segments for speakers no longer active
-    for (const spk of Object.keys(active)) {
-      if (!activeSpeakers.has(Number(spk))) {
-        segments.push({ start: active[spk].start, end: time, localSpeaker: Number(spk) });
-        delete active[spk];
+function trackToSegments(track, frameDuration, localSpeaker, totalDuration) {
+  const segs = [];
+  let start = -1;
+  for (let f = 0; f < track.length; f++) {
+    if (track[f] && start < 0) start = f * frameDuration;
+    else if (!track[f] && start >= 0) {
+      segs.push({ start, end: f * frameDuration, localSpeaker });
+      start = -1;
+    }
+  }
+  if (start >= 0) segs.push({ start, end: totalDuration, localSpeaker });
+  return segs;
+}
+
+function mergeAndFilterSegments(segs, maxGap, minDur) {
+  const merged = [];
+  for (const seg of segs) {
+    const prev = merged[merged.length - 1];
+    if (prev && seg.start - prev.end <= maxGap) prev.end = seg.end;
+    else merged.push({ ...seg });
+  }
+  return merged.filter((s) => s.end - s.start >= minDur);
+}
+
+// Merge speaker centroids that became more similar than the threshold
+// (fixes clusters split early on noisy embeddings). Returns a label remap
+// and notifies the UI so already-displayed labels can be rewritten.
+function checkCentroidMerges() {
+  const remap = {};
+  for (let i = 0; i < speakerCentroids.length; i++) {
+    for (let j = i + 1; j < speakerCentroids.length; j++) {
+      const a = speakerCentroids[i];
+      const b = speakerCentroids[j];
+      if (cosineSimilarity(a.centroid, b.centroid) >= similarityThreshold) {
+        const total = a.count + b.count;
+        for (let k = 0; k < a.centroid.length; k++) {
+          a.centroid[k] = (a.centroid[k] * a.count + b.centroid[k] * b.count) / total;
+        }
+        a.count = total;
+        remap[`Speaker ${b.id}`] = `Speaker ${a.id}`;
+        speakerCentroids.splice(j, 1);
+        j--;
       }
     }
-
-    // Open segments for newly active speakers
-    for (const spk of activeSpeakers) {
-      if (!active[spk]) active[spk] = { start: time };
-    }
   }
 
-  // Close any remaining open segments
-  const totalDuration = audio.length / SAMPLE_RATE;
-  for (const spk of Object.keys(active)) {
-    segments.push({ start: active[spk].start, end: totalDuration, localSpeaker: Number(spk) });
-    delete active[spk];
-  }
+  if (Object.keys(remap).length === 0) return null;
 
-  return segments;
+  // Resolve chains (e.g. 3 -> 2 -> 1)
+  for (const key of Object.keys(remap)) {
+    let target = remap[key];
+    while (remap[target]) target = remap[target];
+    remap[key] = target;
+  }
+  self.postMessage({ type: "speakers-remap", map: remap });
+  return remap;
 }
 
 async function identifySpeaker(audioSlice) {
