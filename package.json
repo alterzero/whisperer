@@ -1,0 +1,16 @@
+{
+  "name": "whisperer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension for local speech-to-text using Whisper",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.0",
+    "@litert-lm/core": "^0.13.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}
