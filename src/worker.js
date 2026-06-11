@@ -18,7 +18,7 @@ self.onmessage = async (e) => {
         model || "onnx-community/whisper-tiny",
         {
           device: "wasm",
-          dtype: model?.includes("medium") || model?.includes("large") ? "q4" : undefined,
+          dtype: model?.includes("medium") || model?.includes("large") ? "q4" : "q8",
           progress_callback: (progress) => {
             const file = progress.file?.split("/").pop() || "";
             if (progress.status === "progress") {
@@ -45,7 +45,12 @@ self.onmessage = async (e) => {
     }
 
     try {
-      const opts = { return_timestamps: true, task: "transcribe" };
+      const opts = {
+        return_timestamps: true,
+        task: "transcribe",
+        chunk_length_s: 30,
+        stride_length_s: 5,
+      };
       if (language && language !== "auto") opts.language = language;
 
       const result = await transcriber(audio, opts);

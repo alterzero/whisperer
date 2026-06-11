@@ -19,7 +19,7 @@ let currentChunks = [];
 let isRecording = false;
 let activeStreams = [];
 let captureCtx = null;
-let processorNode = null;
+let workletNode = null;
 let pcmBuffers = [];
 let pcmSampleCount = 0;
 let pcmOffset = 0;
@@ -282,7 +282,7 @@ async function startRecording() {
     liveText = ""; liveChunks = [];
     isLiveProcessing = false; isFinalizing = false; liveProcessingDone = null;
 
-    setupPcmCapture(stream);
+    await setupPcmCapture(stream);
     liveInterval = setInterval(processLiveChunk, LIVE_INTERVAL_MS);
 
     isRecording = true;
@@ -322,27 +322,39 @@ function stopRecording() {
 
 // --- PCM Capture ---
 
-function setupPcmCapture(stream) {
+const WORKLET_CODE = `
+class PcmProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch?.length > 0) this.port.postMessage(new Float32Array(ch));
+    return true;
+  }
+}
+registerProcessor("pcm-processor", PcmProcessor);
+`;
+
+async function setupPcmCapture(stream) {
   captureCtx = new AudioContext();
   nativeSampleRate = captureCtx.sampleRate;
-  const source = captureCtx.createMediaStreamSource(stream);
-  processorNode = captureCtx.createScriptProcessor(4096, 1, 1);
-  const mute = captureCtx.createGain();
-  mute.gain.value = 0;
 
-  processorNode.onaudioprocess = (e) => {
-    const data = e.inputBuffer.getChannelData(0);
-    pcmBuffers.push(new Float32Array(data));
-    pcmSampleCount += data.length;
+  const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+  const url = URL.createObjectURL(blob);
+  await captureCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  const source = captureCtx.createMediaStreamSource(stream);
+  workletNode = new AudioWorkletNode(captureCtx, "pcm-processor");
+  workletNode.port.onmessage = (e) => {
+    pcmBuffers.push(e.data);
+    pcmSampleCount += e.data.length;
   };
 
-  source.connect(processorNode);
-  processorNode.connect(mute);
-  mute.connect(captureCtx.destination);
+  source.connect(workletNode);
+  workletNode.connect(captureCtx.destination);
 }
 
 function stopPcmCapture() {
-  if (processorNode) { processorNode.disconnect(); processorNode = null; }
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
   if (captureCtx) { captureCtx.close(); captureCtx = null; }
 }
 
