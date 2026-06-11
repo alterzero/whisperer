@@ -11,6 +11,7 @@ let embeddingModel = null;
 let embeddingProcessor = null;
 let isDiarizationReady = false;
 let speakerCentroids = []; // [{id, centroid: Float32Array, count}]
+let nextSpeakerId = 1;
 let similarityThreshold = 0.6;
 
 const SAMPLE_RATE = 16000;
@@ -117,6 +118,7 @@ self.onmessage = async (e) => {
 
   if (type === "reset-speakers") {
     speakerCentroids = [];
+    nextSpeakerId = 1;
   }
 
   if (type === "transcribe-live") {
@@ -197,6 +199,8 @@ async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
     byLocal.get(seg.localSpeaker).push(seg);
   }
 
+  // Compute one embedding per local speaker
+  const locals = []; // [{segs, embedding}]
   for (const segs of byLocal.values()) {
     const maxSamples = SAMPLE_RATE * MAX_EMBED_SEC;
     const parts = [];
@@ -221,12 +225,51 @@ async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
       if (pos >= concat.length) break;
     }
 
-    const label = await identifySpeaker(concat);
+    const embedding = await computeEmbedding(concat);
+    if (embedding) locals.push({ segs, embedding });
+  }
+
+  // Constrained matching: pyannote says these local speakers are DIFFERENT
+  // people, so they must never map to the same global speaker. Greedy
+  // assignment by highest similarity, each centroid usable at most once.
+  const simMatrix = locals.map((l) =>
+    speakerCentroids.map((c) => cosineSimilarity(l.embedding, c.centroid))
+  );
+  const assignedCentroid = new Array(locals.length).fill(-1);
+  const takenCentroids = new Set();
+
+  for (;;) {
+    let bi = -1, bj = -1, bestSim = similarityThreshold;
+    for (let i = 0; i < locals.length; i++) {
+      if (assignedCentroid[i] >= 0) continue;
+      for (let j = 0; j < speakerCentroids.length; j++) {
+        if (takenCentroids.has(j)) continue;
+        if (simMatrix[i][j] >= bestSim) { bestSim = simMatrix[i][j]; bi = i; bj = j; }
+      }
+    }
+    if (bi < 0) break;
+    assignedCentroid[bi] = bj;
+    takenCentroids.add(bj);
+  }
+
+  for (let i = 0; i < locals.length; i++) {
+    const { segs, embedding } = locals[i];
+    let label;
+    if (assignedCentroid[i] >= 0) {
+      label = updateCentroid(speakerCentroids[assignedCentroid[i]], embedding);
+    } else {
+      const id = nextSpeakerId++;
+      speakerCentroids.push({ id, centroid: embedding, count: 1 });
+      label = `Speaker ${id}`;
+    }
     for (const seg of segs) seg.speaker = label;
   }
 
-  // Merge centroids that drifted close together, remap labels accordingly
-  const remap = checkCentroidMerges();
+  // Merge centroids only when they are near-identical. Using the match
+  // threshold here collapsed distinct speakers into Speaker 1, since
+  // different-speaker centroids often exceed it.
+  const mergeThreshold = Math.min(0.97, similarityThreshold + 0.25);
+  const remap = checkCentroidMerges(mergeThreshold);
   if (remap) {
     for (const seg of segments) {
       if (seg.speaker && remap[seg.speaker]) seg.speaker = remap[seg.speaker];
@@ -234,6 +277,15 @@ async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
   }
 
   return labelChunks(whisperChunks, segments, timeOffset);
+}
+
+function updateCentroid(spk, embedding) {
+  const w = spk.count / (spk.count + 1);
+  for (let i = 0; i < spk.centroid.length; i++) {
+    spk.centroid[i] = w * spk.centroid[i] + (1 - w) * embedding[i];
+  }
+  spk.count++;
+  return `Speaker ${spk.id}`;
 }
 
 // Assign speakers to whisper chunks; split a chunk's text proportionally
@@ -390,13 +442,13 @@ function mergeAndFilterSegments(segs, maxGap, minDur) {
 // Merge speaker centroids that became more similar than the threshold
 // (fixes clusters split early on noisy embeddings). Returns a label remap
 // and notifies the UI so already-displayed labels can be rewritten.
-function checkCentroidMerges() {
+function checkCentroidMerges(mergeThreshold) {
   const remap = {};
   for (let i = 0; i < speakerCentroids.length; i++) {
     for (let j = i + 1; j < speakerCentroids.length; j++) {
       const a = speakerCentroids[i];
       const b = speakerCentroids[j];
-      if (cosineSimilarity(a.centroid, b.centroid) >= similarityThreshold) {
+      if (cosineSimilarity(a.centroid, b.centroid) >= mergeThreshold) {
         const total = a.count + b.count;
         for (let k = 0; k < a.centroid.length; k++) {
           a.centroid[k] = (a.centroid[k] * a.count + b.centroid[k] * b.count) / total;
@@ -421,14 +473,14 @@ function checkCentroidMerges() {
   return remap;
 }
 
-async function identifySpeaker(audioSlice) {
+async function computeEmbedding(audioSlice) {
   const inputs = await embeddingProcessor(audioSlice, { sampling_rate: SAMPLE_RATE });
   const output = await embeddingModel(inputs);
 
   // Extract embedding - WavLM outputs embeddings in last_hidden_state or embeddings
   let embedding;
   if (output.embeddings) {
-    embedding = output.embeddings.data;
+    embedding = Float32Array.from(output.embeddings.data);
   } else if (output.last_hidden_state) {
     // Mean pooling over time dimension
     const hs = output.last_hidden_state;
@@ -448,30 +500,9 @@ async function identifySpeaker(audioSlice) {
   for (let i = 0; i < embedding.length; i++) norm += embedding[i] * embedding[i];
   norm = Math.sqrt(norm);
   if (norm > 0) for (let i = 0; i < embedding.length; i++) embedding[i] /= norm;
+  else return null;
 
-  // Match against known speakers
-  let bestSim = -1;
-  let bestIdx = -1;
-  for (let i = 0; i < speakerCentroids.length; i++) {
-    const sim = cosineSimilarity(embedding, speakerCentroids[i].centroid);
-    if (sim > bestSim) { bestSim = sim; bestIdx = i; }
-  }
-
-  if (bestSim >= similarityThreshold && bestIdx >= 0) {
-    // Update running centroid
-    const spk = speakerCentroids[bestIdx];
-    const w = spk.count / (spk.count + 1);
-    for (let i = 0; i < spk.centroid.length; i++) {
-      spk.centroid[i] = w * spk.centroid[i] + (1 - w) * embedding[i];
-    }
-    spk.count++;
-    return `Speaker ${spk.id}`;
-  }
-
-  // New speaker
-  const id = speakerCentroids.length + 1;
-  speakerCentroids.push({ id, centroid: embedding, count: 1 });
-  return `Speaker ${id}`;
+  return embedding;
 }
 
 function cosineSimilarity(a, b) {
