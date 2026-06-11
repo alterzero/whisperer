@@ -31,6 +31,19 @@
       </div>
     </div>
 
+    <!-- Speaker Diarization Settings -->
+    <div class="section">
+      <h2>Speaker Diarization</h2>
+
+      <div class="field">
+        <label for="diarization-threshold">
+          Speaker similarity threshold: <span id="diarization-threshold-value">0.60</span>
+        </label>
+        <input type="range" id="diarization-threshold" min="0.3" max="0.9" step="0.05" value="0.6">
+        <span class="hint">Higher = stricter matching (fewer speakers). Lower = looser matching (more speakers). Default: 0.60</span>
+      </div>
+    </div>
+
     <!-- Summarizer Settings -->
     <div class="section">
       <h2>AI Summarizer</h2>

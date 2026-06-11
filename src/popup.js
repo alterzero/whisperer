@@ -15,6 +15,8 @@ const CONFIG_DEFAULTS = {
     { title: "Decisions", instruction: "List any decisions that were made" },
     { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
   ],
+  diarizationEnabled: false,
+  diarizationThreshold: 0.6,
 };
 
 let config = { ...CONFIG_DEFAULTS };
@@ -28,6 +30,8 @@ let isSummarizerReady = false;
 let isSummarizerLoading = false;
 let pendingSummarize = false;
 let currentChunks = [];
+let isDiarizationReady = false;
+let isDiarizationLoading = false;
 
 // Recording state
 let isRecording = false;
@@ -79,6 +83,8 @@ const summaryProgressContainer = $("summary-progress-container");
 const summaryProgressBar = $("summary-progress-bar");
 const summaryProgressText = $("summary-progress-text");
 const summaryResult = $("summary-result");
+const diarizationToggle = $("diarization-toggle");
+const diarizationStatus = $("diarization-status");
 const copySummaryBtn = $("copy-summary-btn");
 const downloadSummaryBtn = $("download-summary-btn");
 
@@ -115,6 +121,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   sourceSelect.addEventListener("change", () => chrome.storage.local.set({ [SOURCE_KEY]: sourceSelect.value }));
   languageSelect.addEventListener("change", () => chrome.storage.local.set({ [LANG_KEY]: languageSelect.value }));
+
+  diarizationToggle.checked = config.diarizationEnabled;
+  diarizationToggle.addEventListener("change", () => {
+    config.diarizationEnabled = diarizationToggle.checked;
+    chrome.storage.local.set({ [CONFIG_KEY]: config });
+    if (config.diarizationEnabled && !isDiarizationReady && !isDiarizationLoading) {
+      loadDiarization();
+    }
+  });
 
   worker = new Worker("worker.bundle.js", { type: "module" });
   worker.onmessage = handleWorkerMessage;
@@ -154,6 +169,17 @@ function handleWorkerMessage(e) {
       if (liveProcessingDone) { liveProcessingDone(); liveProcessingDone = null; }
       if (isFinalizing) { isFinalizing = false; finalizeLiveTranscription(); }
       break;
+    case "diarization-ready":
+      isDiarizationReady = true;
+      isDiarizationLoading = false;
+      diarizationStatus.textContent = "Ready";
+      diarizationStatus.className = "diarization-status ready";
+      break;
+    case "diarization-error":
+      isDiarizationLoading = false;
+      diarizationStatus.textContent = "Error: " + msg.message;
+      diarizationStatus.className = "diarization-status error";
+      break;
     case "error":
       setModelStatus("Error: " + msg.message, "error");
       progressContainer.classList.add("hidden");
@@ -174,6 +200,13 @@ function loadModel() {
   progressBar.style.width = "0%";
   progressText.textContent = "0%";
   worker.postMessage({ type: "load", model: modelSelect.value });
+}
+
+function loadDiarization() {
+  isDiarizationLoading = true;
+  diarizationStatus.textContent = "Loading...";
+  diarizationStatus.className = "diarization-status loading";
+  worker.postMessage({ type: "load-diarization", threshold: config.diarizationThreshold });
 }
 
 // --- Summarizer Worker ---
@@ -301,6 +334,7 @@ async function startRecording() {
     pcmBuffers = []; pcmSampleCount = 0; pcmOffset = 0; liveSentSamples = 0;
     liveText = ""; liveChunks = [];
     isLiveProcessing = false; isFinalizing = false; liveProcessingDone = null;
+    worker.postMessage({ type: "reset-speakers" });
 
     await setupPcmCapture(stream);
     liveInterval = setInterval(processLiveChunk, config.liveIntervalMs);
@@ -411,7 +445,7 @@ function sendLiveChunk(rawPcm, timeOffset) {
   const resampled = resample(rawPcm, nativeSampleRate, 16000);
   isLiveProcessing = true;
   worker.postMessage(
-    { type: "transcribe-live", audio: resampled, language: languageSelect.value, timeOffset },
+    { type: "transcribe-live", audio: resampled, language: languageSelect.value, timeOffset, diarize: config.diarizationEnabled && isDiarizationReady },
     [resampled.buffer]
   );
 }
@@ -432,8 +466,14 @@ function handleLiveResult(text, chunks) {
   if (liveProcessingDone) { liveProcessingDone(); liveProcessingDone = null; }
 
   if (text?.trim()) {
-    liveText += (liveText ? " " : "") + text.trim();
     liveChunks.push(...(chunks || []));
+    const hasSpeakers = chunks?.some((c) => c.speaker);
+    if (hasSpeakers) {
+      const labeled = chunks.map((c) => c.speaker ? `[${c.speaker}] ${c.text.trim()}` : c.text.trim()).join("\n");
+      liveText += (liveText ? "\n" : "") + labeled;
+    } else {
+      liveText += (liveText ? " " : "") + text.trim();
+    }
     transcriptionResult.textContent = liveText;
     transcriptionResult.scrollTop = transcriptionResult.scrollHeight;
   }
@@ -493,7 +533,8 @@ function downloadSubtitle(format) {
     const start = c.timestamp?.[0] ?? 0;
     const end = c.timestamp?.[1] ?? start + 5;
     const time = `${formatSubTime(start, sep)} --> ${formatSubTime(end, sep)}`;
-    return format === "srt" ? `${i + 1}\n${time}\n${c.text.trim()}\n` : `${time}\n${c.text.trim()}\n`;
+    const speaker = c.speaker ? `[${c.speaker}] ` : "";
+    return format === "srt" ? `${i + 1}\n${time}\n${speaker}${c.text.trim()}\n` : `${time}\n${speaker}${c.text.trim()}\n`;
   }).join("\n");
 
   const content = format === "vtt" ? `WEBVTT\n\n${lines}` : lines;

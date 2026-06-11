@@ -11,6 +11,8 @@ const DEFAULTS = {
     { title: "Decisions", instruction: "List any decisions that were made" },
     { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
   ],
+  diarizationEnabled: false,
+  diarizationThreshold: 0.6,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +22,8 @@ const maxHistoryInput = $("max-history");
 const maxTokensInput = $("max-tokens");
 const chunkCharsInput = $("chunk-chars");
 const systemPromptInput = $("system-prompt");
+const diarizationThresholdInput = $("diarization-threshold");
+const diarizationThresholdValue = $("diarization-threshold-value");
 const sectionsList = $("sections-list");
 const addSectionBtn = $("add-section-btn");
 const saveBtn = $("save-btn");
@@ -37,6 +41,8 @@ function populateForm(config) {
   maxTokensInput.value = config.maxTokens;
   chunkCharsInput.value = config.chunkChars;
   systemPromptInput.value = config.systemPrompt;
+  diarizationThresholdInput.value = config.diarizationThreshold;
+  diarizationThresholdValue.textContent = config.diarizationThreshold.toFixed(2);
   renderSections(config.sections);
 }
 
@@ -100,6 +106,7 @@ function collectConfig() {
     chunkChars: Math.max(5000, parseInt(chunkCharsInput.value, 10) || DEFAULTS.chunkChars),
     systemPrompt: systemPromptInput.value.trim() || DEFAULTS.systemPrompt,
     sections: collectSections().length > 0 ? collectSections() : DEFAULTS.sections,
+    diarizationThreshold: Math.max(0.3, Math.min(0.9, parseFloat(diarizationThresholdInput.value) || DEFAULTS.diarizationThreshold)),
   };
 }
 
@@ -109,6 +116,10 @@ async function save() {
   saveStatus.textContent = "Settings saved";
   setTimeout(() => { saveStatus.textContent = ""; }, 2000);
 }
+
+diarizationThresholdInput.addEventListener("input", () => {
+  diarizationThresholdValue.textContent = parseFloat(diarizationThresholdInput.value).toFixed(2);
+});
 
 addSectionBtn.addEventListener("click", () => {
   const index = sectionsList.children.length;

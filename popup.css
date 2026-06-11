@@ -43,6 +43,39 @@ header h1 {
   width: 100%;
 }
 
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #ccc;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+.toggle-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.diarization-status {
+  font-size: 11px;
+  color: #888;
+}
+
+.diarization-status.ready {
+  color: #4ecdc4;
+}
+
+.diarization-status.loading {
+  color: #ffd93d;
+}
+
+.diarization-status.error {
+  color: #ff6b6b;
+}
+
 .section {
   margin-bottom: 16px;
 }

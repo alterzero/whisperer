@@ -5,22 +5,25 @@ A Chrome extension that transcribes speech to text entirely in the browser using
 ## Features
 
 - **Real-time transcription** — see results as you speak, not after
+- **Speaker diarization** — identify who is speaking using pyannote segmentation + WavLM embeddings
 - **Multiple Whisper models** — from Tiny (~45 MB) to Large V3 (~800 MB), choose your speed/accuracy tradeoff
 - **AI-powered summaries** — summarize transcriptions using Gemma 4 E4B (LiteRT-LM), also runs locally
 - **99 languages** supported with auto-detection
 - **Audio sources** — microphone, system audio (tab/screen capture), or both mixed
-- **Subtitle export** — download transcriptions as SRT or VTT with timestamps
+- **Subtitle export** — download transcriptions as SRT or VTT with timestamps and speaker labels
 - **History** — automatically saves transcriptions to local storage
+- **Configurable** — settings page for tokens, chunk size, summary sections, diarization threshold
 - **Model caching** — Gemma 4 model is cached in IndexedDB after first download (~3 GB)
 
 ## How It Works
 
-| Component | Library | Runtime |
-|-----------|---------|---------|
-| Speech-to-text | [Transformers.js](https://github.com/huggingface/transformers.js) (Whisper ONNX) | WebAssembly |
-| AI Summarizer | [@litert-lm/core](https://www.npmjs.com/package/@litert-lm/core) (Gemma 4 E4B) | WebGPU |
+| Component | Library | Model | Size |
+|-----------|---------|-------|------|
+| Speech-to-text | [Transformers.js](https://github.com/huggingface/transformers.js) | Whisper (ONNX) | 45 MB–800 MB |
+| Speaker diarization | [Transformers.js](https://github.com/huggingface/transformers.js) | pyannote-segmentation-3.0 + WavLM | ~104 MB |
+| AI Summarizer | [@litert-lm/core](https://www.npmjs.com/package/@litert-lm/core) | Gemma 4 E4B | ~3 GB |
 
-Both models run in dedicated Web Workers to keep the UI responsive.
+All models run in Web Workers to keep the UI responsive. Whisper and diarization use WebAssembly; the summarizer uses WebGPU.
 
 ## Requirements
 
@@ -71,21 +74,27 @@ Then click the reload button on the extension card in `chrome://extensions`.
 
 1. **Load a model** — select a Whisper model size and click "Load"
 2. **Choose language** — select the transcription language or leave on auto-detect
-3. **Record** — click "Start Recording" and grant microphone/screen access
-4. **View results** — transcription appears in real-time during recording
-5. **Export** — copy to clipboard, save as TXT, or download SRT/VTT subtitles
-6. **Summarize** — click "Summarize" to generate structured meeting notes (downloads Gemma 4 on first use)
+3. **Enable diarization** (optional) — check "Speaker Diarization" to identify speakers (downloads ~104 MB on first use)
+4. **Record** — click "Start Recording" and grant microphone/screen access
+5. **View results** — transcription appears in real-time with `[Speaker 1]`, `[Speaker 2]` labels when diarization is on
+6. **Export** — copy to clipboard, save as TXT, or download SRT/VTT subtitles (includes speaker labels)
+7. **Summarize** — click "Summarize" to generate structured meeting notes (downloads Gemma 4 on first use)
+8. **Settings** — click the Settings button to configure tokens, chunk size, summary sections, and diarization threshold
 
 ## Project Structure
 
 ```
 src/
   popup.js          UI logic, audio capture, recording state
-  worker.js         Whisper ASR web worker (ESM)
+  worker.js         Whisper ASR + speaker diarization web worker (ESM)
   summarizer.js     Gemma 4 LiteRT-LM summarizer web worker (IIFE)
+  options.js        Settings page logic
 build.js            esbuild bundler + WASM file copier
 popup.html          Extension UI
 popup.css           Styles
+options.html        Settings page
+options.css         Settings styles
+pcm-processor.js    AudioWorklet processor for PCM capture
 background.js       Opens popup in a new tab on icon click
 manifest.json       Chrome MV3 manifest
 ```
@@ -99,6 +108,7 @@ The build script (`build.js`) does two things:
    - `popup.js` → `popup.bundle.js` (IIFE)
    - `worker.js` → `worker.bundle.js` (ESM module worker)
    - `summarizer.js` → `summarizer.bundle.js` (IIFE classic worker, required for `importScripts` compatibility)
+   - `options.js` → `options.bundle.js` (IIFE)
 
 ## License
 
