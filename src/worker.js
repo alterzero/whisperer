@@ -1,4 +1,4 @@
-import { pipeline, AutoModel, AutoProcessor, WavLMForXVector, env } from "@huggingface/transformers";
+import { pipeline, AutoModel, AutoProcessor, AutoModelForAudioFrameClassification, env } from "@huggingface/transformers";
 
 env.backends.onnx.wasm.wasmPaths = new URL("./", import.meta.url).href;
 
@@ -79,35 +79,25 @@ self.onmessage = async (e) => {
 
       self.postMessage({ type: "status", message: "Loading diarization models..." });
 
+      // Use official pyannote processor (includes post_process_speaker_diarization)
       segmentationProcessor = await AutoProcessor.from_pretrained(
         "onnx-community/pyannote-segmentation-3.0",
         { progress_callback: progressCallback("Segmentation: ") }
       );
-      segmentationModel = await AutoModel.from_pretrained(
+      segmentationModel = await AutoModelForAudioFrameClassification.from_pretrained(
         "onnx-community/pyannote-segmentation-3.0",
         { device: "wasm", dtype: "fp32", progress_callback: progressCallback("Segmentation: ") }
       );
 
+      // WeSpeaker: pyannote's recommended speaker embedding model (256-dim)
       embeddingProcessor = await AutoProcessor.from_pretrained(
-        "Xenova/wavlm-base-plus-sv",
+        "onnx-community/wespeaker-voxceleb-resnet34-LM",
         { progress_callback: progressCallback("Embedding: ") }
       );
-      if (await detectWebGPU()) {
-        try {
-          embeddingModel = await WavLMForXVector.from_pretrained(
-            "Xenova/wavlm-base-plus-sv",
-            { device: "webgpu", dtype: "fp32", progress_callback: progressCallback("Embedding: ") }
-          );
-        } catch {
-          embeddingModel = null;
-        }
-      }
-      if (!embeddingModel) {
-        embeddingModel = await WavLMForXVector.from_pretrained(
-          "Xenova/wavlm-base-plus-sv",
-          { device: "wasm", dtype: "q8", progress_callback: progressCallback("Embedding: ") }
-        );
-      }
+      embeddingModel = await AutoModel.from_pretrained(
+        "onnx-community/wespeaker-voxceleb-resnet34-LM",
+        { device: "wasm", dtype: "fp32", progress_callback: progressCallback("Embedding: ") }
+      );
 
       isDiarizationReady = true;
       self.postMessage({ type: "diarization-ready" });
@@ -190,32 +180,21 @@ const SEG_MIN_DUR_SEC = 0.3; // drop segments shorter than this after merging
 async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
   if (segments.length === 0) return whisperChunks;
 
-  // Group segments by local speaker and compute one embedding per local
-  // speaker from their concatenated speech. Longer audio gives far more
-  // reliable WavLM embeddings than tiny per-segment slices.
-  const byLocal = new Map();
+  // Extract speech audio from all segments, compute one embedding for this chunk
+  const maxSamples = SAMPLE_RATE * MAX_EMBED_SEC;
+  const parts = [];
+  let total = 0;
   for (const seg of segments) {
-    if (!byLocal.has(seg.localSpeaker)) byLocal.set(seg.localSpeaker, []);
-    byLocal.get(seg.localSpeaker).push(seg);
+    if (total >= maxSamples) break;
+    const slice = audio.subarray(
+      Math.floor(seg.start * SAMPLE_RATE),
+      Math.floor(seg.end * SAMPLE_RATE)
+    );
+    parts.push(slice);
+    total += slice.length;
   }
 
-  // Compute one embedding per local speaker
-  const locals = []; // [{segs, embedding}]
-  for (const segs of byLocal.values()) {
-    const maxSamples = SAMPLE_RATE * MAX_EMBED_SEC;
-    const parts = [];
-    let total = 0;
-    for (const seg of segs) {
-      if (total >= maxSamples) break;
-      const slice = audio.subarray(
-        Math.floor(seg.start * SAMPLE_RATE),
-        Math.floor(seg.end * SAMPLE_RATE)
-      );
-      parts.push(slice);
-      total += slice.length;
-    }
-    if (total < SAMPLE_RATE * MIN_EMBED_SEC) continue; // too little speech
-
+  if (total >= SAMPLE_RATE * MIN_EMBED_SEC) {
     const concat = new Float32Array(Math.min(total, maxSamples));
     let pos = 0;
     for (const p of parts) {
@@ -226,64 +205,53 @@ async function assignSpeakers(audio, whisperChunks, timeOffset, segments) {
     }
 
     const embedding = await computeEmbedding(concat);
-    if (embedding) locals.push({ segs, embedding });
-  }
+    if (embedding) {
+      const label = matchOrCreateSpeaker(embedding);
+      for (const seg of segments) seg.speaker = label;
 
-  // Constrained matching: pyannote says these local speakers are DIFFERENT
-  // people, so they must never map to the same global speaker. Greedy
-  // assignment by highest similarity, each centroid usable at most once.
-  const simMatrix = locals.map((l) =>
-    speakerCentroids.map((c) => cosineSimilarity(l.embedding, c.centroid))
-  );
-  const assignedCentroid = new Array(locals.length).fill(-1);
-  const takenCentroids = new Set();
-
-  for (;;) {
-    let bi = -1, bj = -1, bestSim = similarityThreshold;
-    for (let i = 0; i < locals.length; i++) {
-      if (assignedCentroid[i] >= 0) continue;
-      for (let j = 0; j < speakerCentroids.length; j++) {
-        if (takenCentroids.has(j)) continue;
-        if (simMatrix[i][j] >= bestSim) { bestSim = simMatrix[i][j]; bi = i; bj = j; }
+      // Merge centroids that converged (fixes duplicate speakers from
+      // noisy early embeddings). Remap updates displayed labels.
+      const remap = checkCentroidMerges(0.92);
+      if (remap) {
+        for (const seg of segments) {
+          if (seg.speaker && remap[seg.speaker]) seg.speaker = remap[seg.speaker];
+        }
       }
-    }
-    if (bi < 0) break;
-    assignedCentroid[bi] = bj;
-    takenCentroids.add(bj);
-  }
-
-  for (let i = 0; i < locals.length; i++) {
-    const { segs, embedding } = locals[i];
-    let label;
-    if (assignedCentroid[i] >= 0) {
-      label = updateCentroid(speakerCentroids[assignedCentroid[i]], embedding);
     } else {
-      const id = nextSpeakerId++;
-      speakerCentroids.push({ id, centroid: embedding, count: 1 });
-      label = `Speaker ${id}`;
-    }
-    for (const seg of segs) seg.speaker = label;
-  }
-
-  // Merge centroids only when they are near-identical. Using the match
-  // threshold here collapsed distinct speakers into Speaker 1, since
-  // different-speaker centroids often exceed it.
-  const mergeThreshold = Math.min(0.97, similarityThreshold + 0.25);
-  const remap = checkCentroidMerges(mergeThreshold);
-  if (remap) {
-    for (const seg of segments) {
-      if (seg.speaker && remap[seg.speaker]) seg.speaker = remap[seg.speaker];
+      self.postMessage({ type: "diarization-warn", message: "No embedding produced for chunk" });
     }
   }
 
   return labelChunks(whisperChunks, segments, timeOffset);
 }
 
+function matchOrCreateSpeaker(embedding) {
+  let bestSim = -1;
+  let bestIdx = -1;
+  for (let i = 0; i < speakerCentroids.length; i++) {
+    const sim = cosineSimilarity(embedding, speakerCentroids[i].centroid);
+    if (sim > bestSim) { bestSim = sim; bestIdx = i; }
+  }
+
+  if (bestSim >= similarityThreshold && bestIdx >= 0) {
+    return updateCentroid(speakerCentroids[bestIdx], embedding);
+  }
+
+  const id = nextSpeakerId++;
+  speakerCentroids.push({ id, centroid: embedding, count: 1 });
+  return `Speaker ${id}`;
+}
+
 function updateCentroid(spk, embedding) {
-  const w = spk.count / (spk.count + 1);
+  const w = Math.min(0.8, spk.count / (spk.count + 1));
   for (let i = 0; i < spk.centroid.length; i++) {
     spk.centroid[i] = w * spk.centroid[i] + (1 - w) * embedding[i];
   }
+  // Re-normalize to unit length after update
+  let norm = 0;
+  for (let i = 0; i < spk.centroid.length; i++) norm += spk.centroid[i] * spk.centroid[i];
+  norm = Math.sqrt(norm);
+  if (norm > 0) for (let i = 0; i < spk.centroid.length; i++) spk.centroid[i] /= norm;
   spk.count++;
   return `Speaker ${spk.id}`;
 }
@@ -365,83 +333,20 @@ async function getSegments(audio) {
   const inputs = await segmentationProcessor(audio);
   const { logits } = await segmentationModel(inputs);
 
-  // logits shape: [1, numFrames, numClasses]
-  // pyannote-segmentation-3.0 outputs 7 classes (powerset):
-  // 0=none, 1=spk1, 2=spk2, 3=spk3, 4=spk1+spk2, 5=spk1+spk3, 6=spk2+spk3
-  const data = logits.data;
-  const numFrames = logits.dims[1];
-  const numClasses = logits.dims[2];
-  const frameDuration = audio.length / SAMPLE_RATE / numFrames;
+  // Use pyannote's official post-processing: softmax → argmax per frame,
+  // merge consecutive same-speaker frames into segments with confidence.
+  // Returns [{id, start, end, confidence}] where id is a powerset class.
+  const result = segmentationProcessor.post_process_speaker_diarization(logits, audio.length);
+  const raw = result[0] || [];
 
-  // Decode per-frame argmax into 3 boolean activity tracks
-  const tracks = [new Uint8Array(numFrames), new Uint8Array(numFrames), new Uint8Array(numFrames)];
-  for (let f = 0; f < numFrames; f++) {
-    const offset = f * numClasses;
-    let maxVal = -Infinity;
-    let maxIdx = 0;
-    for (let c = 0; c < numClasses; c++) {
-      if (data[offset + c] > maxVal) { maxVal = data[offset + c]; maxIdx = c; }
-    }
-    if (maxIdx === 1 || maxIdx === 4 || maxIdx === 5) tracks[0][f] = 1;
-    if (maxIdx === 2 || maxIdx === 4 || maxIdx === 6) tracks[1][f] = 1;
-    if (maxIdx === 3 || maxIdx === 5 || maxIdx === 6) tracks[2][f] = 1;
-  }
-
-  const segments = []; // [{start, end, localSpeaker}]
-  const totalDuration = audio.length / SAMPLE_RATE;
-  for (let s = 0; s < 3; s++) {
-    const smoothed = majorityFilter(tracks[s], 5); // remove frame flicker
-    let segs = trackToSegments(smoothed, frameDuration, s + 1, totalDuration);
-    segs = mergeAndFilterSegments(segs, SEG_MAX_GAP_SEC, SEG_MIN_DUR_SEC);
-    segments.push(...segs);
-  }
-  segments.sort((a, b) => a.start - b.start);
-  return segments;
+  // Filter: skip non-speech (id=0) and low-confidence / short segments
+  return raw
+    .filter((s) => s.id !== 0 && s.end - s.start >= SEG_MIN_DUR_SEC)
+    .map((s) => ({ start: s.start, end: s.end, localSpeaker: s.id }));
 }
 
-// Majority vote over a sliding window for a binary track
-function majorityFilter(track, windowSize) {
-  const half = Math.floor(windowSize / 2);
-  const out = new Uint8Array(track.length);
-  for (let i = 0; i < track.length; i++) {
-    let ones = 0;
-    let count = 0;
-    for (let j = Math.max(0, i - half); j <= Math.min(track.length - 1, i + half); j++) {
-      ones += track[j];
-      count++;
-    }
-    out[i] = ones * 2 > count ? 1 : 0;
-  }
-  return out;
-}
-
-function trackToSegments(track, frameDuration, localSpeaker, totalDuration) {
-  const segs = [];
-  let start = -1;
-  for (let f = 0; f < track.length; f++) {
-    if (track[f] && start < 0) start = f * frameDuration;
-    else if (!track[f] && start >= 0) {
-      segs.push({ start, end: f * frameDuration, localSpeaker });
-      start = -1;
-    }
-  }
-  if (start >= 0) segs.push({ start, end: totalDuration, localSpeaker });
-  return segs;
-}
-
-function mergeAndFilterSegments(segs, maxGap, minDur) {
-  const merged = [];
-  for (const seg of segs) {
-    const prev = merged[merged.length - 1];
-    if (prev && seg.start - prev.end <= maxGap) prev.end = seg.end;
-    else merged.push({ ...seg });
-  }
-  return merged.filter((s) => s.end - s.start >= minDur);
-}
-
-// Merge speaker centroids that became more similar than the threshold
-// (fixes clusters split early on noisy embeddings). Returns a label remap
-// and notifies the UI so already-displayed labels can be rewritten.
+// Merge speaker centroids that converged to near-identical embeddings.
+// Returns a label remap or null if nothing changed.
 function checkCentroidMerges(mergeThreshold) {
   const remap = {};
   for (let i = 0; i < speakerCentroids.length; i++) {
@@ -463,7 +368,6 @@ function checkCentroidMerges(mergeThreshold) {
 
   if (Object.keys(remap).length === 0) return null;
 
-  // Resolve chains (e.g. 3 -> 2 -> 1)
   for (const key of Object.keys(remap)) {
     let target = remap[key];
     while (remap[target]) target = remap[target];
@@ -474,18 +378,14 @@ function checkCentroidMerges(mergeThreshold) {
 }
 
 async function computeEmbedding(audioSlice) {
-  const inputs = await embeddingProcessor(audioSlice, { sampling_rate: SAMPLE_RATE });
+  const inputs = await embeddingProcessor(audioSlice);
   const output = await embeddingModel(inputs);
 
-  // WavLMForXVector outputs x-vector speaker embeddings in output.embeddings
-  // (512-dim, from the TDNN + projection head). These are discriminative for
-  // speaker identity, unlike raw last_hidden_state which captures phonetics.
-  let embedding;
-  if (output.embeddings) {
-    embedding = Float32Array.from(output.embeddings.data);
-  } else {
-    return null;
-  }
+  // WeSpeaker outputs speaker embeddings in last_hidden_state [1, 256]
+  const raw = output.embeddings || output.last_hidden_state;
+  if (!raw) return null;
+
+  const embedding = Float32Array.from(raw.data);
 
   // L2 normalize
   let norm = 0;
