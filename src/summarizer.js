@@ -96,7 +96,7 @@ self.onmessage = async (e) => {
 
       engine = await Engine.create({
         model: modelStream,
-        mainExecutorSettings: { maxNumTokens: 4096 },
+        mainExecutorSettings: { maxNumTokens: 16384 },
       });
 
       self.postMessage({ type: "ready" });
@@ -124,6 +124,9 @@ self.onmessage = async (e) => {
         },
       });
 
+      const MAX_INPUT_CHARS = 24000;
+      const trimmed = text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) + "\n[...transcription truncated]" : text;
+
       const langLine = language ? `\nIMPORTANT: Write the summary in ${language}, matching the language of the transcription.\n` : "";
       const prompt = `Analyze the following transcription and provide a structured summary with these sections:
 
@@ -139,7 +142,7 @@ self.onmessage = async (e) => {
 Be concise and use bullet points. If a section has no relevant content, write "None identified."
 ${langLine}
 Transcription:
-${text}`;
+${trimmed}`;
 
       let summary = "";
       const stream = conversation.sendMessageStreaming(prompt);
