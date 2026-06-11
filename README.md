@@ -36,6 +36,17 @@ npm run build
 
 ## Installing in Chrome
 
+### Option A: Download pre-built package
+
+1. Download the [ready-to-install package](https://drive.google.com/file/d/1CyCxB-Rbdi97bZcmP4fj8ho6AUTuh-DX/view?usp=sharing) and extract the zip
+2. Open Chrome and navigate to `chrome://extensions`
+3. Enable **Developer mode** (toggle in the top-right corner)
+4. Click **Load unpacked**
+5. Select the extracted folder (the folder containing `manifest.json`)
+6. The Whisperer icon will appear in your toolbar — click it to open
+
+### Option B: Build from source
+
 1. Clone the repository and build:
    ```bash
    git clone https://github.com/alterzero/whisperer.git
