@@ -96,7 +96,7 @@ self.onmessage = async (e) => {
 
       engine = await Engine.create({
         model: modelStream,
-        mainExecutorSettings: { maxNumTokens: 16384 },
+        mainExecutorSettings: { maxNumTokens: 131072 },
       });
 
       self.postMessage({ type: "ready" });
@@ -124,7 +124,7 @@ self.onmessage = async (e) => {
         },
       });
 
-      const MAX_INPUT_CHARS = 64000;
+      const MAX_INPUT_CHARS = 500000;
       const trimmed = text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) + "\n[...transcription truncated]" : text;
 
       const langLine = language ? `\nIMPORTANT: Write the summary in ${language}, matching the language of the transcription.\n` : "";
