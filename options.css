@@ -1,0 +1,119 @@
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  font-size: 13px;
+  color: #ccc;
+  margin-bottom: 4px;
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #16213e;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.field input:focus,
+.field textarea:focus {
+  border-color: #00d4ff;
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 40px;
+}
+
+.hint {
+  display: block;
+  font-size: 11px;
+  color: #666;
+  margin-top: 3px;
+}
+
+.sections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.section-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #16213e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.section-entry-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.section-entry-header input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+}
+
+.section-entry-header input:focus {
+  border-color: #00d4ff;
+}
+
+.section-entry textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+  min-height: 30px;
+}
+
+.section-entry textarea:focus {
+  border-color: #00d4ff;
+}
+
+.remove-section-btn {
+  background: none;
+  border: none;
+  color: #ff6b6b;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.remove-section-btn:hover {
+  color: #ff4444;
+}
+
+.save-status {
+  text-align: center;
+  font-size: 12px;
+  margin-top: 8px;
+  min-height: 18px;
+  color: #4ecdc4;
+}

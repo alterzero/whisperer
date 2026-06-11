@@ -2,8 +2,22 @@ const STORAGE_KEY = "whisperer_transcriptions";
 const MODEL_KEY = "whisperer_selected_model";
 const SOURCE_KEY = "whisperer_audio_source";
 const LANG_KEY = "whisperer_language";
-const LIVE_INTERVAL_MS = 5000;
-const MAX_HISTORY = 50;
+const CONFIG_KEY = "whisperer_config";
+
+const CONFIG_DEFAULTS = {
+  liveIntervalMs: 5000,
+  maxHistory: 50,
+  maxTokens: 16384,
+  chunkChars: 20000,
+  systemPrompt: "You are a concise meeting notes assistant. Always respond with structured bullet points.",
+  sections: [
+    { title: "Important Points", instruction: "List the key points discussed" },
+    { title: "Decisions", instruction: "List any decisions that were made" },
+    { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
+  ],
+};
+
+let config = { ...CONFIG_DEFAULTS };
 
 // --- State ---
 
@@ -71,10 +85,11 @@ const downloadSummaryBtn = $("download-summary-btn");
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const stored = await chrome.storage.local.get([MODEL_KEY, SOURCE_KEY, LANG_KEY]);
+  const stored = await chrome.storage.local.get([MODEL_KEY, SOURCE_KEY, LANG_KEY, CONFIG_KEY]);
   if (stored[MODEL_KEY]) modelSelect.value = stored[MODEL_KEY];
   if (stored[SOURCE_KEY]) sourceSelect.value = stored[SOURCE_KEY];
   if (stored[LANG_KEY]) languageSelect.value = stored[LANG_KEY];
+  if (stored[CONFIG_KEY]) config = { ...CONFIG_DEFAULTS, ...stored[CONFIG_KEY] };
 
   await renderHistory();
 
@@ -212,7 +227,7 @@ function handleSummarize() {
     if (!isSummarizerLoading) {
       isSummarizerLoading = true;
       summaryStatus.textContent = "Loading summarizer model...";
-      summarizerWorker.postMessage({ type: "load", wasmPath: chrome.runtime.getURL("") });
+      summarizerWorker.postMessage({ type: "load", wasmPath: chrome.runtime.getURL(""), maxTokens: config.maxTokens });
     }
     pendingSummarize = true;
     return;
@@ -226,7 +241,12 @@ function doSummarize() {
   summaryStatus.textContent = "Summarizing...";
   const sel = languageSelect.selectedOptions[0];
   const language = sel && sel.value !== "auto" ? sel.textContent.trim() : "";
-  summarizerWorker.postMessage({ type: "summarize", text, language });
+  summarizerWorker.postMessage({
+    type: "summarize", text, language,
+    chunkChars: config.chunkChars,
+    systemPrompt: config.systemPrompt,
+    sections: config.sections,
+  });
 }
 
 // --- Audio Streams ---
@@ -283,7 +303,7 @@ async function startRecording() {
     isLiveProcessing = false; isFinalizing = false; liveProcessingDone = null;
 
     await setupPcmCapture(stream);
-    liveInterval = setInterval(processLiveChunk, LIVE_INTERVAL_MS);
+    liveInterval = setInterval(processLiveChunk, config.liveIntervalMs);
 
     isRecording = true;
     recordingStartTime = Date.now();
@@ -503,7 +523,7 @@ async function saveTranscription(text, chunks) {
   const result = await chrome.storage.local.get(STORAGE_KEY);
   const list = result[STORAGE_KEY] || [];
   list.unshift({ id: crypto.randomUUID(), text, chunks: chunks || [], source: sourceSelect.value, timestamp: new Date().toISOString() });
-  if (list.length > MAX_HISTORY) list.length = MAX_HISTORY;
+  if (list.length > config.maxHistory) list.length = config.maxHistory;
   await chrome.storage.local.set({ [STORAGE_KEY]: list });
 }
 

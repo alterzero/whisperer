@@ -81,7 +81,7 @@ async function loadModelStream() {
 // --- Message handler ---
 
 self.onmessage = async (e) => {
-  const { type, text, wasmPath, language } = e.data;
+  const { type, text, wasmPath, language, maxTokens, chunkChars, systemPrompt, sections } = e.data;
 
   if (type === "load") {
     try {
@@ -96,7 +96,7 @@ self.onmessage = async (e) => {
 
       engine = await Engine.create({
         model: modelStream,
-        mainExecutorSettings: { maxNumTokens: 16384 },
+        mainExecutorSettings: { maxNumTokens: maxTokens || 16384 },
       });
 
       self.postMessage({ type: "ready" });
@@ -112,42 +112,42 @@ self.onmessage = async (e) => {
     }
 
     try {
-      const CHUNK_CHARS = 20000;
+      const chunkSize = chunkChars || 20000;
+      const sysPrompt = systemPrompt || "You are a concise meeting notes assistant. Always respond with structured bullet points.";
+      const sects = sections || [
+        { title: "Important Points", instruction: "List the key points discussed" },
+        { title: "Decisions", instruction: "List any decisions that were made" },
+        { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
+      ];
       const langNote = language ? ` You MUST write the entire summary in ${language}.` : "";
       const langLine = language ? `\nIMPORTANT: Write the summary in ${language}, matching the language of the transcription.\n` : "";
+      const sectionsBlock = sects.map((s) => `**${s.title}:**\n- ${s.instruction}`).join("\n\n");
 
-      if (text.length <= CHUNK_CHARS) {
+      if (text.length <= chunkSize) {
         post("status", "Summarizing...");
-        const summary = await streamSummarize(buildPrompt(text, langLine), langNote);
+        const summary = await streamSummarize(buildPrompt(text, langLine, sectionsBlock), sysPrompt, langNote);
         self.postMessage({ type: "result", summary: summary || "No summary generated" });
       } else {
-        const chunks = splitText(text, CHUNK_CHARS);
+        const chunks = splitText(text, chunkSize);
         const partials = [];
 
         for (let i = 0; i < chunks.length; i++) {
           post("status", `Summarizing part ${i + 1} of ${chunks.length}...`);
-          const partial = await streamSummarize(buildPrompt(chunks[i], langLine), langNote);
+          const partial = await streamSummarize(buildPrompt(chunks[i], langLine, sectionsBlock), sysPrompt, langNote);
           partials.push(partial);
         }
 
         post("status", "Merging summaries...");
         const mergePrompt = `Merge the following partial summaries into a single structured summary with these sections:
 
-**Important Points:**
-- List the key points discussed
-
-**Decisions:**
-- List any decisions that were made
-
-**Action Items:**
-- List any tasks, follow-ups, or action items mentioned
+${sectionsBlock}
 
 Be concise, deduplicate, and use bullet points. If a section has no relevant content, write "None identified."
 ${langLine}
 Partial summaries:
 ${partials.map((s, i) => `--- Part ${i + 1} ---\n${s}`).join("\n\n")}`;
 
-        const summary = await streamSummarize(mergePrompt, langNote);
+        const summary = await streamSummarize(mergePrompt, sysPrompt, langNote);
         self.postMessage({ type: "result", summary: summary || "No summary generated" });
       }
     } catch (err) {
@@ -156,17 +156,10 @@ ${partials.map((s, i) => `--- Part ${i + 1} ---\n${s}`).join("\n\n")}`;
   }
 };
 
-function buildPrompt(text, langLine) {
+function buildPrompt(text, langLine, sectionsBlock) {
   return `Analyze the following transcription and provide a structured summary with these sections:
 
-**Important Points:**
-- List the key points discussed
-
-**Decisions:**
-- List any decisions that were made
-
-**Action Items:**
-- List any tasks, follow-ups, or action items mentioned
+${sectionsBlock}
 
 Be concise and use bullet points. If a section has no relevant content, write "None identified."
 ${langLine}
@@ -189,12 +182,12 @@ function splitText(text, maxChars) {
   return chunks;
 }
 
-async function streamSummarize(prompt, langNote) {
+async function streamSummarize(prompt, sysPrompt, langNote) {
   const conversation = await engine.createConversation({
     preface: {
       messages: [{
         role: "system",
-        content: `You are a concise meeting notes assistant. Always respond with structured bullet points.${langNote}`,
+        content: `${sysPrompt}${langNote}`,
       }],
     },
   });

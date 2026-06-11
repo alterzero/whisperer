@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisperer Settings</title>
+  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Whisperer Settings</h1>
+      <p class="subtitle">Configure transcription and summarization</p>
+    </header>
+
+    <!-- Transcription Settings -->
+    <div class="section">
+      <h2>Transcription</h2>
+
+      <div class="field">
+        <label for="live-interval">Live transcription interval (ms)</label>
+        <input type="number" id="live-interval" min="1000" max="30000" step="500">
+        <span class="hint">How often audio chunks are sent for transcription (default: 5000)</span>
+      </div>
+
+      <div class="field">
+        <label for="max-history">Max history entries</label>
+        <input type="number" id="max-history" min="5" max="500" step="5">
+        <span class="hint">Number of transcriptions kept in history (default: 50)</span>
+      </div>
+    </div>
+
+    <!-- Summarizer Settings -->
+    <div class="section">
+      <h2>AI Summarizer</h2>
+
+      <div class="field">
+        <label for="max-tokens">Max tokens</label>
+        <input type="number" id="max-tokens" min="2048" max="131072" step="1024">
+        <span class="hint">Maximum token context for the Gemma model (default: 16384)</span>
+      </div>
+
+      <div class="field">
+        <label for="chunk-chars">Chunk size (characters)</label>
+        <input type="number" id="chunk-chars" min="5000" max="100000" step="1000">
+        <span class="hint">Max characters per chunk before splitting for map-reduce (default: 20000)</span>
+      </div>
+
+      <div class="field">
+        <label for="system-prompt">System prompt</label>
+        <textarea id="system-prompt" rows="2"></textarea>
+        <span class="hint">Instructions for the summarizer's role (default: "You are a concise meeting notes assistant. Always respond with structured bullet points.")</span>
+      </div>
+
+      <div class="field">
+        <label>Summary sections</label>
+        <div id="sections-list" class="sections-list"></div>
+        <button id="add-section-btn" class="btn btn-small">+ Add Section</button>
+        <span class="hint">Customize the summary structure. Each section becomes a heading with instructions.</span>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="action-row">
+      <button id="reset-btn" class="btn btn-small btn-danger">Reset Defaults</button>
+      <button id="save-btn" class="btn btn-small btn-accent">Save Settings</button>
+    </div>
+    <div id="save-status" class="save-status"></div>
+  </div>
+
+  <script src="options.bundle.js"></script>
+</body>
+</html>

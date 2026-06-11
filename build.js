@@ -76,6 +76,16 @@ async function build() {
     minify: true,
   });
 
+  // Build options page
+  await esbuild.build({
+    entryPoints: ["src/options.js"],
+    bundle: true,
+    outfile: "options.bundle.js",
+    format: "iife",
+    target: ["chrome120"],
+    minify: true,
+  });
+
   console.log("Build complete.");
 }
 
