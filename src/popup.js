@@ -322,25 +322,11 @@ function stopRecording() {
 
 // --- PCM Capture ---
 
-const WORKLET_CODE = `
-class PcmProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const ch = inputs[0]?.[0];
-    if (ch?.length > 0) this.port.postMessage(new Float32Array(ch));
-    return true;
-  }
-}
-registerProcessor("pcm-processor", PcmProcessor);
-`;
-
 async function setupPcmCapture(stream) {
   captureCtx = new AudioContext();
   nativeSampleRate = captureCtx.sampleRate;
 
-  const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
-  const url = URL.createObjectURL(blob);
-  await captureCtx.audioWorklet.addModule(url);
-  URL.revokeObjectURL(url);
+  await captureCtx.audioWorklet.addModule(chrome.runtime.getURL("pcm-processor.js"));
 
   const source = captureCtx.createMediaStreamSource(stream);
   workletNode = new AudioWorkletNode(captureCtx, "pcm-processor");
