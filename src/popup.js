@@ -308,7 +308,10 @@ function stopRecording() {
   liveInterval = null;
 
   recordBtn.classList.remove("recording");
-  recordLabel.innerHTML = '<span class="loading"></span> Finalizing...';
+  recordLabel.textContent = "";
+  const spinner = document.createElement("span");
+  spinner.className = "loading";
+  recordLabel.append(spinner, " Finalizing...");
   recordBtn.disabled = true;
 
   stopPcmCapture();
@@ -501,7 +504,7 @@ function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 async function saveTranscription(text, chunks) {
   const result = await chrome.storage.local.get(STORAGE_KEY);
   const list = result[STORAGE_KEY] || [];
-  list.unshift({ id: Date.now(), text, chunks: chunks || [], source: sourceSelect.value, timestamp: new Date().toISOString() });
+  list.unshift({ id: crypto.randomUUID(), text, chunks: chunks || [], source: sourceSelect.value, timestamp: new Date().toISOString() });
   if (list.length > MAX_HISTORY) list.length = MAX_HISTORY;
   await chrome.storage.local.set({ [STORAGE_KEY]: list });
 }
@@ -560,62 +563,79 @@ function dateStamp() {
   return new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
 }
 
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
-}
-
 // --- History ---
+
+function createHistoryItem(t, transcriptions) {
+  const srcLabels = { mic: "Mic", system: "System", both: "Mic+Sys" };
+  const date = new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const src = srcLabels[t.source] || "";
+  const subs = t.chunks?.length > 0;
+
+  const item = document.createElement("div");
+  item.className = "history-item";
+  item.dataset.id = t.id;
+
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "item-btn save-btn";
+  saveBtn.title = "Save TXT";
+  saveBtn.textContent = "\uD83D\uDCBE";
+  saveBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const entry = transcriptions.find((x) => String(x.id) === item.dataset.id);
+    if (entry) downloadTextFile(entry.text, "whisperer-transcription");
+  });
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "item-btn delete-btn";
+  delBtn.title = "Delete";
+  delBtn.textContent = "\u00D7";
+  delBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteTranscription(item.dataset.id);
+  });
+
+  actions.append(saveBtn, delBtn);
+
+  const ts = document.createElement("div");
+  ts.className = "timestamp";
+  ts.textContent = date + (src ? " \u00B7 " + src : "") + (subs ? " \u00B7 Subtitles" : "");
+
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = t.text;
+
+  item.append(actions, ts, text);
+
+  item.addEventListener("click", (e) => {
+    if (e.target.closest(".item-btn")) return;
+    const entry = transcriptions.find((x) => String(x.id) === item.dataset.id);
+    if (!entry) return;
+    transcriptionResult.textContent = entry.text;
+    transcriptionSection.classList.remove("hidden");
+    currentChunks = entry.chunks || [];
+    setSubtitleButtons(currentChunks.length > 0);
+  });
+
+  return item;
+}
 
 async function renderHistory() {
   const transcriptions = await getTranscriptions();
 
+  historyList.textContent = "";
+
   if (transcriptions.length === 0) {
-    historyList.innerHTML = '<p class="empty-state">No transcriptions yet</p>';
+    const p = document.createElement("p");
+    p.className = "empty-state";
+    p.textContent = "No transcriptions yet";
+    historyList.appendChild(p);
     return;
   }
 
-  const srcLabels = { mic: "Mic", system: "System", both: "Mic+Sys" };
-
-  historyList.innerHTML = transcriptions.map((t) => {
-    const date = new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    const src = srcLabels[t.source] || "";
-    const subs = t.chunks?.length > 0;
-    return `<div class="history-item" data-id="${t.id}">
-      <div class="item-actions">
-        <button class="item-btn save-btn" data-id="${t.id}" title="Save TXT">&#128190;</button>
-        <button class="item-btn delete-btn" data-id="${t.id}" title="Delete">&times;</button>
-      </div>
-      <div class="timestamp">${date}${src ? " &middot; " + src : ""}${subs ? " &middot; Subtitles" : ""}</div>
-      <div class="text">${escapeHtml(t.text)}</div>
-    </div>`;
-  }).join("");
-
-  historyList.querySelectorAll(".history-item").forEach((item) => {
-    item.addEventListener("click", (e) => {
-      if (e.target.closest(".item-btn")) return;
-      const entry = transcriptions.find((t) => t.id === Number(item.dataset.id));
-      if (!entry) return;
-      transcriptionResult.textContent = entry.text;
-      transcriptionSection.classList.remove("hidden");
-      currentChunks = entry.chunks || [];
-      setSubtitleButtons(currentChunks.length > 0);
-    });
-  });
-
-  historyList.querySelectorAll(".save-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const entry = transcriptions.find((t) => t.id === Number(btn.dataset.id));
-      if (entry) downloadTextFile(entry.text, "whisperer-transcription");
-    });
-  });
-
-  historyList.querySelectorAll(".delete-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteTranscription(Number(btn.dataset.id));
-    });
-  });
+  for (const t of transcriptions) {
+    historyList.appendChild(createHistoryItem(t, transcriptions));
+  }
 }
