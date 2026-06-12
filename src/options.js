@@ -12,7 +12,7 @@ const DEFAULTS = {
     { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
   ],
   diarizationEnabled: false,
-  diarizationThreshold: 0.6,
+  diarizationThreshold: 0.35,
   vadThreshold: 0.01,
 };
 
@@ -109,7 +109,7 @@ function collectConfig() {
     chunkChars: Math.max(5000, parseInt(chunkCharsInput.value, 10) || DEFAULTS.chunkChars),
     systemPrompt: systemPromptInput.value.trim() || DEFAULTS.systemPrompt,
     sections: collectSections().length > 0 ? collectSections() : DEFAULTS.sections,
-    diarizationThreshold: Math.max(0.3, Math.min(0.9, parseFloat(diarizationThresholdInput.value) || DEFAULTS.diarizationThreshold)),
+    diarizationThreshold: Math.max(0.2, Math.min(0.9, parseFloat(diarizationThresholdInput.value) || DEFAULTS.diarizationThreshold)),
     vadThreshold: clampOrDefault(parseFloat(vadThresholdInput.value), 0, 0.05, DEFAULTS.vadThreshold),
   };
 }

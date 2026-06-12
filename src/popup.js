@@ -16,7 +16,7 @@ const CONFIG_DEFAULTS = {
     { title: "Action Items", instruction: "List any tasks, follow-ups, or action items mentioned" },
   ],
   diarizationEnabled: false,
-  diarizationThreshold: 0.6,
+  diarizationThreshold: 0.35,
   vadThreshold: 0.01,
 };
 
@@ -200,26 +200,17 @@ function handleWorkerMessage(e) {
       diarizationStatus.className = "diarization-status error";
       loadDiarizationBtn.classList.toggle("hidden", !config.diarizationEnabled);
       break;
+    case "diarization-result":
+      finalizeDiarization(msg.chunks);
+      break;
+    case "diarization-progress":
+      diarizationStatus.textContent = `Identifying speakers... ${msg.current}/${msg.total}`;
+      diarizationStatus.className = "diarization-status";
+      break;
     case "diarization-warn":
-      // Non-fatal: a single chunk failed diarization, transcription continues
       diarizationStatus.textContent = "Warning: " + msg.message;
       diarizationStatus.className = "diarization-status error";
       break;
-    case "speakers-remap": {
-      // Worker merged speaker clusters; rewrite labels in displayed text
-      let changed = false;
-      for (const c of liveChunks) {
-        if (c.speaker && msg.map[c.speaker]) { c.speaker = msg.map[c.speaker]; changed = true; }
-      }
-      for (const c of currentChunks) {
-        if (c.speaker && msg.map[c.speaker]) { c.speaker = msg.map[c.speaker]; changed = true; }
-      }
-      if (changed && liveChunks.length > 0) {
-        liveText = buildDisplayText(liveChunks);
-        transcriptionResult.textContent = liveText;
-      }
-      break;
-    }
     case "error":
       setModelStatus("Error: " + msg.message, "error");
       progressContainer.classList.add("hidden");
@@ -259,7 +250,7 @@ function loadDiarization() {
   loadDiarizationBtn.disabled = true;
   loadDiarizationBtn.classList.add("hidden");
   diarizationStatus.textContent = "Loading...";
-  diarizationStatus.className = "diarization-status loading";
+  diarizationStatus.className = "diarization-status";
   worker.postMessage({ type: "load-diarization", threshold: config.diarizationThreshold });
 }
 
@@ -389,7 +380,7 @@ async function startRecording() {
     committedSamples = 0; lastSeenSamples = 0; lastChunkStartSample = 0; lastChunkEndSample = 0;
     liveText = ""; liveChunks = [];
     isLiveProcessing = false; isFinalizing = false; liveProcessingDone = null;
-    worker.postMessage({ type: "reset-speakers" });
+    // keep all PCM when diarization is on (needed for batch diarization at end)
 
     await setupPcmCapture(stream);
     dynamicIntervalMs = config.liveIntervalMs;
@@ -519,6 +510,8 @@ function extractPcm(startSample) {
 }
 
 function trimPcmBuffers() {
+  // Keep all audio when diarization is on — needed for batch speaker assignment
+  if (config.diarizationEnabled && isDiarizationReady) return;
   let offset = pcmOffset;
   let cut = 0;
   for (let i = 0; i < pcmBuffers.length; i++) {
@@ -535,7 +528,7 @@ async function sendLiveChunk(rawPcm, timeOffset) {
   isLiveProcessing = true;
   const resampled = await resample(rawPcm, nativeSampleRate, 16000);
   worker.postMessage(
-    { type: "transcribe-live", audio: resampled, language: languageSelect.value, timeOffset, diarize: config.diarizationEnabled && isDiarizationReady },
+    { type: "transcribe-live", audio: resampled, language: languageSelect.value, timeOffset },
     [resampled.buffer]
   );
 }
@@ -679,10 +672,39 @@ async function finalizeLiveTranscription() {
 
   transcriptionResult.textContent = text;
   transcriptionSection.classList.remove("hidden");
+
+  // Batch diarization: extract full audio, resample, send to worker
+  if (config.diarizationEnabled && isDiarizationReady && liveChunks.length > 0) {
+    setModelStatus("Assigning speakers...", "in-progress");
+    diarizationStatus.textContent = "Preparing audio...";
+    diarizationStatus.className = "diarization-status";
+    const fullPcm = extractPcm(0);
+    const resampled = await resample(fullPcm, nativeSampleRate, 16000);
+    worker.postMessage(
+      { type: "diarize-batch", audio: resampled, chunks: liveChunks.map((c) => ({ text: c.text, timestamp: c.timestamp })), threshold: config.diarizationThreshold },
+      [resampled.buffer]
+    );
+    return; // finalization continues in diarization-result handler
+  }
+
   setModelStatus("Ready", "ready");
   if (currentChunks.length > 0) setSubtitleButtons(true);
-
   await saveTranscription(text, currentChunks);
+  await renderHistory();
+  resetRecordButton();
+}
+
+async function finalizeDiarization(chunks) {
+  liveChunks = chunks;
+  currentChunks = chunks;
+  liveText = buildDisplayText(liveChunks);
+  transcriptionResult.textContent = liveText;
+  transcriptionSection.classList.remove("hidden");
+  setModelStatus("Ready", "ready");
+  diarizationStatus.textContent = "Ready";
+  diarizationStatus.className = "diarization-status ready";
+  if (currentChunks.length > 0) setSubtitleButtons(true);
+  await saveTranscription(liveText, currentChunks);
   await renderHistory();
   resetRecordButton();
 }

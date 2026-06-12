@@ -5,7 +5,7 @@ A Chrome extension that transcribes speech to text entirely in the browser using
 ## Features
 
 - **Real-time transcription** — see results as you speak, not after
-- **Speaker diarization** — identify who is speaking using pyannote segmentation + WavLM embeddings
+- **Speaker diarization** — identify who is speaking using WeSpeaker embeddings with multi-scale clustering (batch, post-recording)
 - **Multiple Whisper models** — from Tiny (~45 MB) to Large V3 (~800 MB), choose your speed/accuracy tradeoff
 - **AI-powered summaries** — summarize transcriptions using Gemma 4 E4B (LiteRT-LM), also runs locally
 - **99 languages** supported with auto-detection
@@ -20,7 +20,7 @@ A Chrome extension that transcribes speech to text entirely in the browser using
 | Component | Library | Model | Size |
 |-----------|---------|-------|------|
 | Speech-to-text | [Transformers.js](https://github.com/huggingface/transformers.js) | Whisper (ONNX) | 45 MB–800 MB |
-| Speaker diarization | [Transformers.js](https://github.com/huggingface/transformers.js) | pyannote-segmentation-3.0 + WavLM | ~104 MB |
+| Speaker diarization | [Transformers.js](https://github.com/huggingface/transformers.js) | WeSpeaker voxceleb-resnet34-LM | ~35 MB |
 | AI Summarizer | [@litert-lm/core](https://www.npmjs.com/package/@litert-lm/core) | Gemma 4 E4B | ~3 GB |
 
 All models run in Web Workers to keep the UI responsive. Whisper and diarization use WebAssembly; the summarizer uses WebGPU.
@@ -74,9 +74,9 @@ Then click the reload button on the extension card in `chrome://extensions`.
 
 1. **Load a model** — select a Whisper model size and click "Load"
 2. **Choose language** — select the transcription language or leave on auto-detect
-3. **Enable diarization** (optional) — check "Speaker Diarization" to identify speakers (downloads ~104 MB on first use)
+3. **Enable diarization** (optional) — check "Speaker Diarization" and click "Load" to download the embedding model (~35 MB on first use)
 4. **Record** — click "Start Recording" and grant microphone/screen access
-5. **View results** — transcription appears in real-time with `[Speaker 1]`, `[Speaker 2]` labels when diarization is on
+5. **View results** — transcription appears in real-time; after recording stops, speakers are identified and labeled as `[Speaker 1]`, `[Speaker 2]`, etc.
 6. **Export** — copy to clipboard, save as TXT, or download SRT/VTT subtitles (includes speaker labels)
 7. **Summarize** — click "Summarize" to generate structured meeting notes (downloads Gemma 4 on first use)
 8. **Settings** — click the Settings button to configure tokens, chunk size, summary sections, and diarization threshold
